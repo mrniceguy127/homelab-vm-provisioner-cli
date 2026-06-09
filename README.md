@@ -17,6 +17,43 @@ A lightweight KVM/libvirt provisioning tool for creating and managing virtual ma
 - YAML-based configuration
 - Trusted and isolated VM modes
 
+## Quick Start
+
+Run these commands on the libvirt host.
+
+1. Install the dependencies for your distro from the `Installation` section below.
+2. Create a user SSH key if you do not already have one:
+
+```bash
+mkdir -p keys
+ssh-keygen -t ed25519 -f keys/devbox
+```
+
+3. Copy the example config and adjust the VM name, username, and SSH key path:
+
+```bash
+cp configs/template.yaml.example configs/devbox.yaml
+nano configs/devbox.yaml
+```
+
+4. Create the VM:
+
+```bash
+./vmctl create configs/devbox.yaml
+```
+
+5. Connect as the admin user after the VM comes up:
+
+```bash
+./vmssh-admin devbox
+```
+
+If your config forwards guest port `22`, tenant access will look like this:
+
+```bash
+ssh myuser@HOST_IP -p 2222
+```
+
 ---
 
 # Project Structure
