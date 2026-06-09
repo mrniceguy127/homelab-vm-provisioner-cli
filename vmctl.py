@@ -2,10 +2,11 @@
 
 import argparse
 import ipaddress
-import os
 import random
+import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import yaml
@@ -16,11 +17,20 @@ PROJECT_DIR = Path(__file__).resolve().parent
 
 PROVIDER_USER = "vmadmin"
 PROVIDER_KEY_DIR = PROJECT_DIR / "provider-keys"
+BUILD_DIR = PROJECT_DIR / ".build"
 
 IMG_DIR = Path("/var/lib/libvirt/images")
 BASE_IMG_NAME = "debian-12-generic-amd64.qcow2"
 BASE_IMG_URL = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 OS_VARIANT = "debian12"
+
+BLOCKED_PRIVATE_RANGES = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+]
 
 
 def tool_exists(tool):
@@ -45,6 +55,13 @@ def capture(cmd, sudo=False):
         cmd = ["sudo"] + cmd
 
     return subprocess.check_output(cmd, text=True).strip()
+
+
+def capture_or_none(cmd, sudo=False):
+    try:
+        return capture(cmd, sudo=sudo)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
 
 
 def require_tools(tools=None):
@@ -78,6 +95,31 @@ def require_tools(tools=None):
 def load_config(path):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def build_dir_for_vm(vm_name):
+    return BUILD_DIR / vm_name
+
+
+def state_file_for_vm(vm_name):
+    return build_dir_for_vm(vm_name) / "state.yaml"
+
+
+def save_vm_state(vm_name, state):
+    build_dir = build_dir_for_vm(vm_name)
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(state_file_for_vm(vm_name), "w", encoding="utf-8") as f:
+        yaml.safe_dump(state, f, sort_keys=False)
+
+
+def load_vm_state(vm_name):
+    state_path = state_file_for_vm(vm_name)
+    if not state_path.exists():
+        return {}
+
+    with open(state_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def resolve_config_path(config_path):
@@ -147,6 +189,20 @@ def get_existing_virsh_networks_text():
     return xml
 
 
+def list_virsh_network_names():
+    result = subprocess.run(
+        ["sudo", "virsh", "net-list", "--all", "--name"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        return []
+
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def subnet_appears_used(prefix):
     haystack = get_existing_routes_text() + "\n" + get_existing_virsh_networks_text()
     return prefix in haystack
@@ -166,6 +222,54 @@ def pick_free_subnet():
             }
 
     raise RuntimeError("Could not find free 192.168.X.0/24 subnet")
+
+
+def parse_network_from_xml(xml_text, vm_name):
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+
+    host = root.find(f".//dhcp/host[@name='{vm_name}']")
+    if host is None:
+        return None
+
+    name = root.findtext("name")
+    ip_node = root.find("ip")
+    if ip_node is None:
+        return None
+
+    gateway = ip_node.get("address")
+    netmask = ip_node.get("netmask")
+    vm_ip = host.get("ip")
+    mac = host.get("mac")
+
+    if not (name and gateway and netmask and vm_ip):
+        return None
+
+    cidr = str(ipaddress.ip_network(f"{gateway}/{netmask}", strict=False))
+
+    return {
+        "mode": "nat",
+        "name": name,
+        "gateway": gateway,
+        "cidr": cidr,
+        "vm_ip": vm_ip,
+        "mac": mac,
+    }
+
+
+def discover_vm_network(vm_name):
+    for net_name in list_virsh_network_names():
+        xml_text = capture_or_none(["virsh", "net-dumpxml", net_name], sudo=True)
+        if not xml_text:
+            continue
+
+        network = parse_network_from_xml(xml_text, vm_name)
+        if network:
+            return network
+
+    return None
 
 
 def provider_private_key_path(vm_name):
@@ -245,7 +349,7 @@ def render_templates(context, template_name):
     user_data = env.get_template(f"{template_name}-user-data.yaml.j2").render(**context)
     meta_data = env.get_template("meta-data.yaml.j2").render(**context)
 
-    build_dir = PROJECT_DIR / ".build" / context["vm_name"]
+    build_dir = build_dir_for_vm(context["vm_name"])
     build_dir.mkdir(parents=True, exist_ok=True)
 
     user_data_path = build_dir / "user-data"
@@ -386,22 +490,15 @@ def apply_firewalld_nat_policy(network, trust, ports):
     vm_ip = network["vm_ip"]
 
     existing_zones = capture(["firewall-cmd", "--permanent", "--get-zones"], sudo=True)
+    zone_created = zone not in existing_zones.split()
 
-    if zone not in existing_zones.split():
+    if zone_created:
         run(["firewall-cmd", "--permanent", "--new-zone", zone], sudo=True)
 
     run(["firewall-cmd", "--permanent", "--zone", zone, "--add-source", cidr], sudo=True)
 
     if trust == "untrusted":
-        blocked_ranges = [
-            "10.0.0.0/8",
-            "172.16.0.0/12",
-            "192.168.0.0/16",
-            "100.64.0.0/10",
-            "169.254.0.0/16",
-        ]
-
-        for rng in blocked_ranges:
+        for rng in BLOCKED_PRIVATE_RANGES:
             run(
                 [
                     "firewall-cmd",
@@ -430,6 +527,187 @@ def apply_firewalld_nat_policy(network, trust, ports):
         )
 
     run(["firewall-cmd", "--reload"], sudo=True)
+    return zone_created
+
+
+def firewalld_zone_exists(zone):
+    zones = capture_or_none(["firewall-cmd", "--permanent", "--get-zones"], sudo=True)
+    if not zones:
+        return False
+
+    return zone in zones.split()
+
+
+def firewalld_zone_for_cidr(cidr, preferred_zone=None):
+    zones = capture_or_none(["firewall-cmd", "--permanent", "--get-zones"], sudo=True)
+    if not zones:
+        return None
+
+    candidates = zones.split()
+    if preferred_zone and preferred_zone in candidates:
+        candidates = [preferred_zone] + [zone for zone in candidates if zone != preferred_zone]
+
+    for zone in candidates:
+        sources = capture_or_none(
+            ["firewall-cmd", "--permanent", "--zone", zone, "--list-sources"],
+            sudo=True,
+        )
+        if not sources:
+            continue
+
+        if cidr in sources.split():
+            return zone
+
+    return None
+
+
+def list_zone_forward_ports(zone=None):
+    cmd = ["firewall-cmd", "--permanent"]
+    if zone is not None:
+        cmd.extend(["--zone", zone])
+    cmd.append("--list-forward-ports")
+
+    output = capture_or_none(cmd, sudo=True)
+    if not output:
+        return []
+
+    return output.split()
+
+
+def find_forward_port_rules_for_vm(vm_ip):
+    rules = []
+    seen = set()
+
+    zones = capture_or_none(["firewall-cmd", "--permanent", "--get-zones"], sudo=True)
+    zone_names = zones.split() if zones else []
+
+    for zone in [None] + zone_names:
+        for spec in list_zone_forward_ports(zone):
+            if f"toaddr={vm_ip}" not in spec:
+                continue
+
+            key = (zone, spec)
+            if key in seen:
+                continue
+
+            seen.add(key)
+            rules.append(key)
+
+    return rules
+
+
+def remove_forward_port_rule(spec, zone=None):
+    cmd = ["firewall-cmd", "--permanent"]
+    if zone is not None:
+        cmd.extend(["--zone", zone])
+    cmd.append(f"--remove-forward-port={spec}")
+    run(cmd, sudo=True, check=False)
+
+
+def firewalld_zone_is_empty(zone):
+    checks = [
+        "--list-sources",
+        "--list-interfaces",
+        "--list-services",
+        "--list-ports",
+        "--list-protocols",
+        "--list-forward-ports",
+        "--list-source-ports",
+        "--list-icmp-blocks",
+        "--list-rich-rules",
+    ]
+
+    for check in checks:
+        value = capture_or_none(["firewall-cmd", "--permanent", "--zone", zone, check], sudo=True)
+        if value is None:
+            return False
+        if value.strip():
+            return False
+
+    return True
+
+
+def cleanup_firewalld_vm_policy(vm_name, network, ports):
+    if not tool_exists("firewall-cmd"):
+        return
+
+    cleanup_attempted = False
+    vm_ip = network.get("vm_ip")
+    cidr = network.get("cidr")
+
+    preferred_zone = network.get("zone") or f"{vm_name}-zone"
+    zone = None
+
+    if preferred_zone and firewalld_zone_exists(preferred_zone):
+        zone = preferred_zone
+    elif cidr:
+        zone = firewalld_zone_for_cidr(cidr, preferred_zone=preferred_zone)
+
+    rules = find_forward_port_rules_for_vm(vm_ip) if vm_ip else []
+    for rule_zone, spec in rules:
+        remove_forward_port_rule(spec, zone=rule_zone)
+        cleanup_attempted = True
+
+    if not rules and vm_ip:
+        for port in ports:
+            spec = (
+                f"port={port['host']}:proto={port.get('proto', 'tcp')}:"
+                f"toaddr={vm_ip}:toport={port['guest']}"
+            )
+            remove_forward_port_rule(spec)
+            cleanup_attempted = True
+
+    if zone:
+        if cidr:
+            run(
+                ["firewall-cmd", "--permanent", "--zone", zone, "--remove-source", cidr],
+                sudo=True,
+                check=False,
+            )
+            cleanup_attempted = True
+
+        for rng in BLOCKED_PRIVATE_RANGES:
+            run(
+                [
+                    "firewall-cmd",
+                    "--permanent",
+                    "--zone",
+                    zone,
+                    "--remove-rich-rule",
+                    f'rule family="ipv4" destination address="{rng}" reject',
+                ],
+                sudo=True,
+                check=False,
+            )
+            cleanup_attempted = True
+
+        if firewalld_zone_is_empty(zone):
+            run(["firewall-cmd", "--permanent", "--delete-zone", zone], sudo=True, check=False)
+            cleanup_attempted = True
+
+    if cleanup_attempted:
+        run(["firewall-cmd", "--reload"], sudo=True, check=False)
+
+
+def cleanup_local_vm_artifacts(vm_name, provider_private_key=None):
+    if provider_private_key is None:
+        provider_private_key = provider_private_key_path(vm_name)
+
+    key_path = Path(provider_private_key)
+    pub_path = Path(str(key_path) + ".pub")
+
+    for path in (key_path, pub_path):
+        if path.exists():
+            path.unlink()
+
+    build_dir = build_dir_for_vm(vm_name)
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+
+
+def cleanup_vm_storage(vm_name):
+    for path in (IMG_DIR / f"{vm_name}.qcow2", IMG_DIR / f"{vm_name}-seed.iso"):
+        run(["rm", "-f", str(path)], sudo=True, check=False)
 
 
 def create(config_path):
@@ -520,6 +798,15 @@ def create(config_path):
         "packages": packages,
     }
 
+    state = {
+        "vm_name": vm_name,
+        "trust": trust,
+        "network": network,
+        "ports": ports,
+        "provider_private_key": str(provider_private_key),
+    }
+    save_vm_state(vm_name, state)
+
     run(["systemctl", "enable", "--now", "libvirtd"], sudo=True)
     run(["systemctl", "enable", "--now", "firewalld"], sudo=True)
 
@@ -538,7 +825,9 @@ def create(config_path):
     virt_install(vm_name, vm, network_arg, vm_disk, seed_iso)
 
     if mode.startswith("nat"):
-        apply_firewalld_nat_policy(network, trust, ports)
+        zone_created = apply_firewalld_nat_policy(network, trust, ports)
+        state["firewalld"] = {"zone_created": zone_created}
+        save_vm_state(vm_name, state)
     else:
         print("Bridge mode selected: skipping host NAT firewall/port-forward rules.")
         print("Use your router/VLAN firewall for isolation.")
@@ -621,21 +910,31 @@ def ssh_admin(vm_name, vm_ip=None):
 
 
 def destroy(vm_name):
+    state = load_vm_state(vm_name)
+    network = dict(state.get("network") or {})
+    network.update(discover_vm_network(vm_name) or {})
+    ports = state.get("ports") or []
+
+    if not network.get("name"):
+        network["name"] = f"{vm_name}-net"
+
+    if not network.get("zone"):
+        network["zone"] = f"{vm_name}-zone"
+
     if vm_exists(vm_name):
         run(["virsh", "destroy", vm_name], sudo=True, check=False)
         run(["virsh", "undefine", vm_name, "--remove-all-storage"], sudo=True, check=False)
 
-    net_name = f"{vm_name}-net"
+    cleanup_firewalld_vm_policy(vm_name, network, ports)
 
-    result = subprocess.run(
-        ["sudo", "virsh", "net-info", net_name],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    run(["virsh", "net-destroy", network["name"]], sudo=True, check=False)
+    run(["virsh", "net-undefine", network["name"]], sudo=True, check=False)
+
+    cleanup_vm_storage(vm_name)
+    cleanup_local_vm_artifacts(
+        vm_name,
+        provider_private_key=state.get("provider_private_key"),
     )
-
-    if result.returncode == 0:
-        run(["virsh", "net-destroy", net_name], sudo=True, check=False)
-        run(["virsh", "net-undefine", net_name], sudo=True, check=False)
 
 
 def main():

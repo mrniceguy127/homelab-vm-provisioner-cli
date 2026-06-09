@@ -89,6 +89,41 @@ class ResolveVmIpv4Tests(unittest.TestCase):
             self.assertEqual(vmctl.resolve_vm_ipv4("demo"), (None, None))
 
 
+class ParseNetworkFromXmlTests(unittest.TestCase):
+    def test_returns_nat_network_details_for_matching_vm(self):
+        xml_text = textwrap.dedent(
+            """\
+            <network>
+              <name>custom-nat-vm-net</name>
+              <forward mode='nat'/>
+              <bridge name='virbr-demo' stp='on' delay='0'/>
+              <ip address='192.168.240.1' netmask='255.255.255.0'>
+                <dhcp>
+                  <host mac='52:54:00:aa:bb:cc' name='demo' ip='192.168.240.50'/>
+                </dhcp>
+              </ip>
+            </network>
+            """
+        )
+
+        self.assertEqual(
+            vmctl.parse_network_from_xml(xml_text, "demo"),
+            {
+                "mode": "nat",
+                "name": "custom-nat-vm-net",
+                "gateway": "192.168.240.1",
+                "cidr": "192.168.240.0/24",
+                "vm_ip": "192.168.240.50",
+                "mac": "52:54:00:aa:bb:cc",
+            },
+        )
+
+    def test_returns_none_when_vm_is_not_present(self):
+        xml_text = "<network><name>demo-net</name></network>"
+
+        self.assertIsNone(vmctl.parse_network_from_xml(xml_text, "demo"))
+
+
 class PickFreeSubnetTests(unittest.TestCase):
     def test_returns_first_available_prefix(self):
         with patch.object(
@@ -243,11 +278,13 @@ class CreateTests(unittest.TestCase):
                 "render_templates",
                 return_value=(Path("/build/user-data"), Path("/build/meta-data")),
             ) as render_templates_mock, patch.object(
+                vmctl, "save_vm_state"
+            ) as save_state_mock, patch.object(
                 vmctl, "create_seed_iso", return_value=Path("/images/demo-seed.iso")
             ), patch.object(
                 vmctl, "virt_install"
             ) as virt_install_mock, patch.object(
-                vmctl, "apply_firewalld_nat_policy"
+                vmctl, "apply_firewalld_nat_policy", return_value=False
             ) as firewall_mock:
                 vmctl.create(str(config_path))
 
@@ -303,6 +340,7 @@ class CreateTests(unittest.TestCase):
             "untrusted",
             [{"host": 2222, "guest": 22}],
         )
+        self.assertEqual(save_state_mock.call_count, 2)
 
 
 class SshAdminTests(unittest.TestCase):
@@ -347,6 +385,166 @@ class SshAdminTests(unittest.TestCase):
             ), patch.object(vmctl, "resolve_vm_ipv4", return_value=(None, None)):
                 with self.assertRaisesRegex(RuntimeError, "Could not determine the VM IP"):
                     vmctl.ssh_admin("demo")
+
+
+class DestroyTests(unittest.TestCase):
+    def test_destroy_removes_firewall_network_storage_and_local_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            build_root = tmpdir_path / ".build"
+            provider_dir = tmpdir_path / "provider-keys"
+            build_vm_dir = build_root / "demo"
+            build_vm_dir.mkdir(parents=True)
+            provider_dir.mkdir()
+
+            provider_key = provider_dir / "demo_provider_ed25519"
+            provider_key.write_text("private", encoding="utf-8")
+            Path(str(provider_key) + ".pub").write_text("public", encoding="utf-8")
+            (build_vm_dir / "state.yaml").write_text("state", encoding="utf-8")
+
+            state = {
+                "provider_private_key": str(provider_key),
+                "network": {
+                    "name": "custom-demo-net",
+                    "zone": "custom-demo-zone",
+                    "cidr": "192.168.240.0/24",
+                    "vm_ip": "192.168.240.50",
+                },
+                "ports": [{"host": 2222, "guest": 22, "proto": "tcp"}],
+            }
+
+            with patch.object(vmctl, "BUILD_DIR", build_root), patch.object(
+                vmctl, "load_vm_state", return_value=state
+            ), patch.object(
+                vmctl, "discover_vm_network", return_value=None
+            ), patch.object(
+                vmctl, "vm_exists", return_value=True
+            ), patch.object(
+                vmctl, "tool_exists", return_value=True
+            ), patch.object(
+                vmctl, "firewalld_zone_exists", return_value=True
+            ), patch.object(
+                vmctl,
+                "find_forward_port_rules_for_vm",
+                return_value=[(None, "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22")],
+            ), patch.object(
+                vmctl, "firewalld_zone_is_empty", return_value=True
+            ), patch.object(vmctl, "run") as run_mock:
+                vmctl.destroy("demo")
+
+        self.assertFalse(provider_key.exists())
+        self.assertFalse(Path(str(provider_key) + ".pub").exists())
+        self.assertFalse(build_vm_dir.exists())
+        self.assertEqual(
+            run_mock.call_args_list,
+            [
+                call(["virsh", "destroy", "demo"], sudo=True, check=False),
+                call(
+                    ["virsh", "undefine", "demo", "--remove-all-storage"],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--remove-forward-port=port=2222:proto=tcp:toaddr=192.168.240.50:toport=22",
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "custom-demo-zone",
+                        "--remove-source",
+                        "192.168.240.0/24",
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "custom-demo-zone",
+                        "--remove-rich-rule",
+                        'rule family="ipv4" destination address="10.0.0.0/8" reject',
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "custom-demo-zone",
+                        "--remove-rich-rule",
+                        'rule family="ipv4" destination address="172.16.0.0/12" reject',
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "custom-demo-zone",
+                        "--remove-rich-rule",
+                        'rule family="ipv4" destination address="192.168.0.0/16" reject',
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "custom-demo-zone",
+                        "--remove-rich-rule",
+                        'rule family="ipv4" destination address="100.64.0.0/10" reject',
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "custom-demo-zone",
+                        "--remove-rich-rule",
+                        'rule family="ipv4" destination address="169.254.0.0/16" reject',
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    ["firewall-cmd", "--permanent", "--delete-zone", "custom-demo-zone"],
+                    sudo=True,
+                    check=False,
+                ),
+                call(["firewall-cmd", "--reload"], sudo=True, check=False),
+                call(["virsh", "net-destroy", "custom-demo-net"], sudo=True, check=False),
+                call(["virsh", "net-undefine", "custom-demo-net"], sudo=True, check=False),
+                call(
+                    ["rm", "-f", "/var/lib/libvirt/images/demo.qcow2"],
+                    sudo=True,
+                    check=False,
+                ),
+                call(
+                    ["rm", "-f", "/var/lib/libvirt/images/demo-seed.iso"],
+                    sudo=True,
+                    check=False,
+                ),
+            ],
+        )
 
 
 if __name__ == "__main__":

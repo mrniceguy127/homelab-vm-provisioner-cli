@@ -230,6 +230,8 @@ cp configs/template.yaml.example configs/my-vm.yaml
 ./vmctl destroy devbox
 ```
 
+This removes the VM, attached libvirt storage, VM-specific libvirt network, VM-specific firewalld state, generated admin keys, and generated `.build/` artifacts.
+
 ## SSH to a VM as administrator
 
 ```bash
