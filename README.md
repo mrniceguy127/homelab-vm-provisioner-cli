@@ -66,11 +66,14 @@ ssh myuser@HOST_IP -p 2222
 ```text
 homelab-vm/
 ├── setup
+├── test
 ├── vmctl
 ├── vmssh-admin
-├── test
-├── coverage
-├── lint
+├── scripts/
+│   ├── test
+│   ├── coverage
+│   ├── docs-build
+│   └── lint
 ├── pyproject.toml
 ├── .github/
 │   └── workflows/
@@ -115,6 +118,10 @@ homelab-vm/
 │   └── ...
 │
 ├── .build/
+│   ├── coverage/
+│   │   ├── .coverage
+│   │   ├── coverage.xml
+│   │   └── html/
 │   └── ...
 │
 └── README.md
@@ -124,12 +131,14 @@ homelab-vm/
 
 | Path | Purpose |
 |--------|--------|
+| test | Full local verification runner |
 | vmctl | CLI launcher |
 | vmssh-admin | Admin SSH launcher |
-| lint | Ruff lint runner |
 | setup | Project setup script |
-| test | Unit test runner |
-| coverage | Coverage runner |
+| scripts/lint | Ruff lint runner |
+| scripts/test | Unit test runner |
+| scripts/coverage | Coverage runner |
+| scripts/docs-build | Sphinx HTML builder |
 | pyproject.toml | Project metadata and tool configuration |
 | .github/workflows | CI/CD automation |
 | homelab_vm_provisioner | Main Python package |
@@ -138,7 +147,7 @@ homelab-vm/
 | configs | VM definitions |
 | keys | User public keys |
 | provider-keys | Generated administrator keypairs |
-| .build | Generated cloud-init artifacts |
+| .build | Generated cloud-init and coverage artifacts |
 | README.md | Documentation |
 
 ---
@@ -214,10 +223,18 @@ CI/CD:
 - publishes docs to the `gh-pages` branch on `main`
 - publishes the HTML coverage site to `gh-pages/coverage/` on `main`
 
+## Run full local verification
+
+```bash
+./test
+```
+
+This runs lint, unit tests, coverage, and the docs build.
+
 ## Build docs
 
 ```bash
-make -C docs html
+./scripts/docs-build
 ```
 
 HTML output:
@@ -229,19 +246,25 @@ docs/_build/html/
 ## Run unit tests
 
 ```bash
-./test
+./scripts/test
 ```
 
 ## Run coverage
 
 ```bash
-./coverage
+./scripts/coverage
 ```
 
 HTML output:
 
 ```text
-coverage-html/index.html
+.build/coverage/html/index.html
+```
+
+XML output:
+
+```text
+.build/coverage/coverage.xml
 ```
 
 ## Run linting
@@ -249,7 +272,7 @@ coverage-html/index.html
 Run it with the repo helper:
 
 ```bash
-./lint
+./scripts/lint
 ```
 
 Or directly:

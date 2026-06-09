@@ -65,7 +65,7 @@ def copy_coverage_site(app, exception):
     if exception is not None or app.builder.format != "html":
         return
 
-    coverage_source = ROOT / "coverage-html"
+    coverage_source = ROOT / ".build" / "coverage" / "html"
     if not coverage_source.exists():
         return
 

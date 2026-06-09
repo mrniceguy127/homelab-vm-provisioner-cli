@@ -176,7 +176,7 @@ fi
 "$VENV_DIR/bin/python" -m pip install -e "$PACKAGE_SPEC"
 
 log "Setup complete"
-printf 'Run ./vmctl, ./vmssh-admin, and ./test without activating the venv.\n'
+printf 'Run ./vmctl, ./vmssh-admin, and ./scripts/test without activating the venv.\n'
 if [[ "$INSTALL_DEV_DEPS" -eq 1 ]]; then
-    printf 'Run ./lint for linting.\n'
+    printf 'Run ./test for the full dev suite, or use ./scripts/lint, ./scripts/coverage, and ./scripts/docs-build individually.\n'
 fi

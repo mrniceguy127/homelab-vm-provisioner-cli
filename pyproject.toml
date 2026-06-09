@@ -48,6 +48,7 @@ known-first-party = ["homelab_vm_provisioner"]
 [tool.coverage.run]
 branch = true
 source = ["homelab_vm_provisioner"]
+data_file = ".build/coverage/.coverage"
 
 [tool.coverage.report]
 fail_under = 85
@@ -55,4 +56,7 @@ show_missing = true
 skip_covered = false
 
 [tool.coverage.html]
-directory = "coverage-html"
+directory = ".build/coverage/html"
+
+[tool.coverage.xml]
+output = ".build/coverage/coverage.xml"
