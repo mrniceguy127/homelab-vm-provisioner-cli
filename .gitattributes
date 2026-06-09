@@ -3,5 +3,6 @@ vmssh-admin text eol=lf
 setup text eol=lf
 test text eol=lf
 scripts/* text eol=lf
+scripts/_resolve_python.sh text eol=lf
 *.sh text eol=lf
 *.py text eol=lf

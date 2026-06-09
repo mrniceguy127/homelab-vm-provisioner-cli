@@ -74,11 +74,14 @@ class RequireToolsTests(unittest.TestCase):
             self.assertIsNone(system.require_tools(["virsh", "wget"]))
 
     def test_exits_when_any_tool_is_missing(self):
-        with patch.object(system, "tool_exists", side_effect=[True, False]):
+        with patch.object(system, "tool_exists", side_effect=[True, False]), patch(
+            "builtins.print"
+        ) as print_mock:
             with self.assertRaises(SystemExit) as exc:
                 system.require_tools(["virsh", "wget"])
 
         self.assertEqual(exc.exception.code, 1)
+        self.assertEqual(print_mock.call_count, 3)
 
     def test_uses_default_required_tools_when_none_are_passed(self):
         with patch.object(system, "DEFAULT_REQUIRED_TOOLS", ("virsh",)), patch.object(

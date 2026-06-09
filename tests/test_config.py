@@ -167,23 +167,26 @@ class ImageSettingsTests(unittest.TestCase):
 
 class DefaultPathTests(unittest.TestCase):
     def test_defaults_use_vm_directory_layout(self):
-        repo_root = Path("C:/repo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
 
-        with patch.object(config, "PROJECT_DIR", repo_root):
-            self.assertEqual(config.default_vm_data_root({}), repo_root / "vm" / "data")
-            self.assertEqual(config.default_vm_state_root({}), repo_root / "vm" / "state")
-            self.assertEqual(config.default_user_key_dir({}), repo_root / "vm" / "keys" / "users")
-            self.assertEqual(
-                config.default_admin_key_dir({}),
-                repo_root / "vm" / "keys" / "admin",
-            )
-            self.assertEqual(
-                config.default_vm_data_dir("demo", {}),
-                repo_root / "vm" / "data" / "demo",
-            )
+            with patch.object(config, "PROJECT_DIR", repo_root):
+                self.assertEqual(config.default_vm_data_root({}), repo_root / "vm" / "data")
+                self.assertEqual(config.default_vm_state_root({}), repo_root / "vm" / "state")
+                self.assertEqual(
+                    config.default_user_key_dir({}),
+                    repo_root / "vm" / "keys" / "users",
+                )
+                self.assertEqual(
+                    config.default_admin_key_dir({}),
+                    repo_root / "vm" / "keys" / "admin",
+                )
+                self.assertEqual(
+                    config.default_vm_data_dir("demo", {}),
+                    repo_root / "vm" / "data" / "demo",
+                )
 
     def test_global_config_overrides_default_roots(self):
-        repo_root = Path("C:/repo")
         global_config = {
             "paths": {
                 "vm_data_dir": "custom/vm-data",
@@ -193,46 +196,52 @@ class DefaultPathTests(unittest.TestCase):
             }
         }
 
-        with patch.object(config, "PROJECT_DIR", repo_root):
-            self.assertEqual(
-                config.default_vm_data_root(global_config),
-                repo_root / "custom" / "vm-data",
-            )
-            self.assertEqual(
-                config.default_vm_state_root(global_config),
-                repo_root / "custom" / "state",
-            )
-            self.assertEqual(
-                config.default_user_key_dir(global_config),
-                repo_root / "custom" / "user-keys",
-            )
-            self.assertEqual(
-                config.default_admin_key_dir(global_config),
-                repo_root / "custom" / "admin-keys",
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+
+            with patch.object(config, "PROJECT_DIR", repo_root):
+                self.assertEqual(
+                    config.default_vm_data_root(global_config),
+                    repo_root / "custom" / "vm-data",
+                )
+                self.assertEqual(
+                    config.default_vm_state_root(global_config),
+                    repo_root / "custom" / "state",
+                )
+                self.assertEqual(
+                    config.default_user_key_dir(global_config),
+                    repo_root / "custom" / "user-keys",
+                )
+                self.assertEqual(
+                    config.default_admin_key_dir(global_config),
+                    repo_root / "custom" / "admin-keys",
+                )
 
     def test_legacy_provider_key_dir_alias_maps_to_admin_key_dir(self):
-        repo_root = Path("C:/repo")
         global_config = {"paths": {"provider_key_dir": "legacy/provider-keys"}}
 
-        with patch.object(config, "PROJECT_DIR", repo_root):
-            self.assertEqual(
-                config.default_admin_key_dir(global_config),
-                repo_root / "legacy" / "provider-keys",
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+
+            with patch.object(config, "PROJECT_DIR", repo_root):
+                self.assertEqual(
+                    config.default_admin_key_dir(global_config),
+                    repo_root / "legacy" / "provider-keys",
+                )
 
     def test_vm_data_dir_can_be_configured_per_vm_config(self):
-        repo_root = Path("C:/repo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
 
-        with patch.object(config, "PROJECT_DIR", repo_root):
-            self.assertEqual(
-                config.vm_data_dir_for_config(
-                    "demo",
-                    {"paths": {"vm_data_dir": "vm/artifacts/demo"}},
-                    global_config={},
-                ),
-                repo_root / "vm" / "artifacts" / "demo",
-            )
+            with patch.object(config, "PROJECT_DIR", repo_root):
+                self.assertEqual(
+                    config.vm_data_dir_for_config(
+                        "demo",
+                        {"paths": {"vm_data_dir": "vm/artifacts/demo"}},
+                        global_config={},
+                    ),
+                    repo_root / "vm" / "artifacts" / "demo",
+                )
 
     def test_resolve_user_key_path_uses_configured_user_key_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -260,10 +269,11 @@ class DefaultPathTests(unittest.TestCase):
         self.assertEqual(resolved, project_key)
 
     def test_resolve_user_key_path_returns_default_user_key_dir_for_missing_filename(self):
-        repo_root = Path("C:/repo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
 
-        with patch.object(config, "PROJECT_DIR", repo_root):
-            resolved = config.resolve_user_key_path("tenant.pub", global_config={})
+            with patch.object(config, "PROJECT_DIR", repo_root):
+                resolved = config.resolve_user_key_path("tenant.pub", global_config={})
 
         self.assertEqual(resolved, repo_root / "vm" / "keys" / "users" / "tenant.pub")
 
@@ -284,31 +294,34 @@ class DefaultPathTests(unittest.TestCase):
         self.assertEqual(resolved, Path("tenant.pub"))
 
     def test_resolve_user_key_path_keeps_absolute_path(self):
-        absolute_key = Path("C:/keys/tenant.pub")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            absolute_key = Path(tmpdir) / "keys" / "tenant.pub"
 
-        self.assertEqual(
-            config.resolve_user_key_path(str(absolute_key), global_config={}),
-            absolute_key,
-        )
+            self.assertEqual(
+                config.resolve_user_key_path(str(absolute_key), global_config={}),
+                absolute_key,
+            )
 
     def test_resolve_user_key_path_returns_project_relative_fallback_for_nested_path(self):
-        repo_root = Path("C:/repo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
 
-        with patch.object(config, "PROJECT_DIR", repo_root):
-            resolved = config.resolve_user_key_path("keys/team/tenant.pub", global_config={})
+            with patch.object(config, "PROJECT_DIR", repo_root):
+                resolved = config.resolve_user_key_path("keys/team/tenant.pub", global_config={})
 
         self.assertEqual(resolved, repo_root / "keys" / "team" / "tenant.pub")
 
 
 class StateFileTests(unittest.TestCase):
     def test_state_file_follows_vm_name(self):
-        repo_root = Path("C:/repo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
 
-        with patch.object(config, "PROJECT_DIR", repo_root):
-            self.assertEqual(
-                config.state_file_for_vm("demo", {}),
-                repo_root / "vm" / "state" / "demo.yaml",
-            )
+            with patch.object(config, "PROJECT_DIR", repo_root):
+                self.assertEqual(
+                    config.state_file_for_vm("demo", {}),
+                    repo_root / "vm" / "state" / "demo.yaml",
+                )
 
     def test_save_and_load_vm_state_use_global_default_state_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
