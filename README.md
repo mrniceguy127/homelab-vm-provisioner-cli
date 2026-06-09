@@ -26,6 +26,9 @@ homelab-vm/
 ├── vmctl
 ├── vmssh-admin
 ├── vmctl.py
+├── tests/
+│   └── test_vmctl.py
+│
 ├── configs/
 │   ├── devbox.yaml
 │   ├── web-service.yaml
@@ -60,6 +63,7 @@ homelab-vm/
 | vmctl | CLI launcher |
 | vmssh-admin | Admin SSH launcher |
 | vmctl.py | Main provisioning application |
+| tests | Unit tests |
 | configs | VM definitions |
 | templates | Cloud-init templates |
 | keys | User public keys |
@@ -199,6 +203,12 @@ Run it on the libvirt host. The helper uses the generated key in `provider-keys/
 
 ```bash
 ./vmssh-admin devbox --ip 192.168.1.50
+```
+
+## Run unit tests
+
+```bash
+python3 -m unittest discover -s tests
 ```
 
 ---
