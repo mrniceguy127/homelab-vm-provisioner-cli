@@ -4,19 +4,29 @@ import argparse
 import subprocess
 from pathlib import Path
 
-from .config import load_config, load_vm_state, resolve_config_path, save_vm_state
-from .constants import PROVIDER_USER
+from .config import (
+    default_admin_key_dir,
+    image_settings_for_config,
+    load_config,
+    load_global_config,
+    load_vm_state,
+    resolve_config_path,
+    resolve_user_key_path,
+    save_vm_state,
+    vm_data_dir_for_config,
+)
+from .constants import ADMIN_USER
 from .firewall import apply_firewalld_nat_policy, cleanup_firewalld_vm_policy
 from .network import discover_vm_network, pick_free_subnet, random_mac, resolve_vm_ipv4
 from .provision import (
+    admin_keypair,
+    admin_private_key_path,
     cleanup_local_vm_artifacts,
     cleanup_vm_storage,
     create_nat_network,
     create_seed_iso,
     create_vm_disk,
     ensure_base_image,
-    provider_keypair,
-    provider_private_key_path,
     render_templates,
     virt_install,
     vm_exists,
@@ -82,7 +92,7 @@ def build_network_config(vm_name, net_cfg):
 
 def build_render_context(
     vm_name,
-    provider_public_key,
+    admin_public_key,
     vm_user,
     vm_public_key,
     allow_sudo,
@@ -92,9 +102,10 @@ def build_render_context(
 
     Args:
         vm_name: VM name.
-        provider_public_key: Admin public SSH key.
+        admin_public_key: Admin public SSH key.
         vm_user: Tenant username.
-        vm_public_key: Tenant public SSH key.
+        vm_public_key: Tenant public SSH key, or ``None`` when it will be added
+            later.
         allow_sudo: Whether the tenant gets passwordless sudo.
         packages: Extra packages to install.
 
@@ -103,8 +114,8 @@ def build_render_context(
     """
     return {
         "vm_name": vm_name,
-        "provider_user": PROVIDER_USER,
-        "provider_public_key": provider_public_key,
+        "admin_user": ADMIN_USER,
+        "admin_public_key": admin_public_key,
         "vm_user": vm_user,
         "vm_public_key": vm_public_key,
         "vm_sudo": "ALL=(ALL) NOPASSWD:ALL" if allow_sudo else "false",
@@ -112,7 +123,7 @@ def build_render_context(
     }
 
 
-def print_create_summary(vm_name, vm_user, trust, network, provider_private_key, ports):
+def print_create_summary(vm_name, vm_user, trust, network, admin_private_key, ports):
     """Print the post-create connection summary for a VM.
 
     Args:
@@ -120,7 +131,7 @@ def print_create_summary(vm_name, vm_user, trust, network, provider_private_key,
         vm_user: Tenant username.
         trust: VM trust level.
         network: Effective network settings.
-        provider_private_key: Admin private key path.
+        admin_private_key: Admin private key path.
         ports: Port forwarding rules.
     """
     print()
@@ -128,16 +139,16 @@ def print_create_summary(vm_name, vm_user, trust, network, provider_private_key,
     print("==========")
     print(f"Name:          {vm_name}")
     print(f"Tenant user:   {vm_user}")
-    print(f"Provider user: {PROVIDER_USER}")
+    print(f"Admin user:    {ADMIN_USER}")
     print(f"Trust:         {trust}")
     print(f"Network mode:  {network['mode']}")
     print(f"VM IP:         {network.get('vm_ip')}")
     print(f"MAC:           {network.get('mac')}")
     print()
-    print("Provider/admin key:")
-    print(f"  {provider_private_key}")
+    print("Admin key:")
+    print(f"  {admin_private_key}")
     print()
-    print("Provider/admin SSH helper:")
+    print("Admin SSH helper:")
     print(f"  ./vmssh-admin {vm_name}")
     print()
 
@@ -147,14 +158,14 @@ def print_create_summary(vm_name, vm_user, trust, network, provider_private_key,
             ssh_port = port["host"]
 
     if network["mode"].startswith("nat") and ssh_port:
-        print("Provider/admin SSH:")
-        print(f"  ssh -i {provider_private_key} {PROVIDER_USER}@HOST_IP -p {ssh_port}")
+        print("Admin SSH:")
+        print(f"  ssh -i {admin_private_key} {ADMIN_USER}@HOST_IP -p {ssh_port}")
         print()
         print("Tenant SSH:")
         print(f"  ssh {vm_user}@HOST_IP -p {ssh_port}")
     elif network["mode"] == "bridge":
-        print("Provider/admin SSH:")
-        print(f"  ssh -i {provider_private_key} {PROVIDER_USER}@VM_LAN_IP")
+        print("Admin SSH:")
+        print(f"  ssh -i {admin_private_key} {ADMIN_USER}@VM_LAN_IP")
         print()
         print("Tenant SSH:")
         print(f"  ssh {vm_user}@VM_LAN_IP")
@@ -172,7 +183,9 @@ def create(config_path):
     """
     require_tools()
 
-    config_data = load_config(resolve_config_path(config_path))
+    resolved_config_path = resolve_config_path(config_path)
+    global_config = load_global_config()
+    config_data = load_config(resolved_config_path)
     vm = config_data["vm"]
     net_cfg = config_data.get("network", {})
     packages = config_data.get("packages", [])
@@ -180,22 +193,30 @@ def create(config_path):
 
     vm_name = vm["name"]
     vm_user = vm["user"]
-    vm_ssh_key_file = Path(vm["ssh_key_file"]).expanduser()
+    vm_ssh_key_file = None
+    if vm.get("ssh_key_file"):
+        vm_ssh_key_file = resolve_user_key_path(vm["ssh_key_file"], global_config=global_config)
     allow_sudo = bool(vm.get("allow_sudo", False))
     trust = vm.get("trust", "untrusted")
     template = vm.get("template", "base")
 
     if trust not in ("trusted", "untrusted"):
         raise ValueError("vm.trust must be trusted or untrusted")
-    if not vm_ssh_key_file.exists():
+    if vm_ssh_key_file is not None and not vm_ssh_key_file.exists():
         raise FileNotFoundError(f"Missing VM SSH key file: {vm_ssh_key_file}")
 
-    provider_private_key, provider_public_key = provider_keypair(vm_name)
-    vm_public_key = vm_ssh_key_file.read_text(encoding="utf-8").strip()
+    vm_data_dir = vm_data_dir_for_config(vm_name, config_data, global_config=global_config)
+    admin_private_key, admin_public_key = admin_keypair(
+        vm_name,
+        admin_key_dir=default_admin_key_dir(global_config),
+    )
+    vm_public_key = None
+    if vm_ssh_key_file is not None:
+        vm_public_key = vm_ssh_key_file.read_text(encoding="utf-8").strip()
     network = build_network_config(vm_name, net_cfg)
     context = build_render_context(
         vm_name,
-        provider_public_key,
+        admin_public_key,
         vm_user,
         vm_public_key,
         allow_sudo,
@@ -204,17 +225,20 @@ def create(config_path):
 
     state = {
         "vm_name": vm_name,
+        "config_path": str(resolved_config_path),
         "trust": trust,
+        "vm_data_dir": str(vm_data_dir),
         "network": network,
         "ports": ports,
-        "provider_private_key": str(provider_private_key),
+        "admin_private_key": str(admin_private_key),
     }
     save_vm_state(vm_name, state)
 
     run(["systemctl", "enable", "--now", "libvirtd"], sudo=True)
     run(["systemctl", "enable", "--now", "firewalld"], sudo=True)
 
-    base_img = ensure_base_image()
+    image_settings = image_settings_for_config(config_data, global_config=global_config)
+    base_img = ensure_base_image(image_settings)
     vm_disk = create_vm_disk(vm_name, vm["disk_gb"], base_img)
     if network["mode"].startswith("nat"):
         create_nat_network(vm_name, network)
@@ -222,9 +246,9 @@ def create(config_path):
     else:
         network_arg = f'bridge={network["bridge_name"]},model=virtio,mac={network["mac"]}'
 
-    user_data, meta_data = render_templates(context, template)
+    user_data, meta_data = render_templates(context, template, vm_data_dir)
     seed_iso = create_seed_iso(vm_name, user_data, meta_data)
-    virt_install(vm_name, vm, network_arg, vm_disk, seed_iso)
+    virt_install(vm_name, vm, network_arg, vm_disk, seed_iso, image_settings["os_variant"])
 
     if network["mode"].startswith("nat"):
         state["firewalld"] = {
@@ -235,7 +259,7 @@ def create(config_path):
         print("Bridge mode selected: skipping host NAT firewall/port-forward rules.")
         print("Use your router/VLAN firewall for isolation.")
 
-    print_create_summary(vm_name, vm_user, trust, network, provider_private_key, ports)
+    print_create_summary(vm_name, vm_user, trust, network, admin_private_key, ports)
 
 
 def ssh_admin(vm_name, vm_ip=None):
@@ -255,10 +279,19 @@ def ssh_admin(vm_name, vm_ip=None):
     if not vm_exists(vm_name):
         raise RuntimeError(f"VM not found: {vm_name}")
 
-    provider_private_key = provider_private_key_path(vm_name)
-    if not provider_private_key.exists():
+    global_config = load_global_config()
+    state = load_vm_state(vm_name)
+    if state.get("admin_private_key"):
+        admin_private_key = Path(state["admin_private_key"])
+    else:
+        admin_private_key = admin_private_key_path(
+            vm_name,
+            admin_key_dir=default_admin_key_dir(global_config),
+        )
+
+    if not admin_private_key.exists():
         raise FileNotFoundError(
-            f"Missing provider SSH key for {vm_name}: {provider_private_key}"
+            f"Missing admin SSH key for {vm_name}: {admin_private_key}"
         )
 
     source = None
@@ -277,10 +310,10 @@ def ssh_admin(vm_name, vm_ip=None):
     cmd = [
         "ssh",
         "-i",
-        str(provider_private_key),
+        str(admin_private_key),
         "-o",
         "IdentitiesOnly=yes",
-        f"{PROVIDER_USER}@{vm_ip}",
+        f"{ADMIN_USER}@{vm_ip}",
     ]
     print("+", " ".join(str(x) for x in cmd))
     result = subprocess.run(cmd)
@@ -309,7 +342,11 @@ def destroy(vm_name):
     run(["virsh", "net-destroy", network["name"]], sudo=True, check=False)
     run(["virsh", "net-undefine", network["name"]], sudo=True, check=False)
     cleanup_vm_storage(vm_name)
-    cleanup_local_vm_artifacts(vm_name, provider_private_key=state.get("provider_private_key"))
+    cleanup_local_vm_artifacts(
+        vm_name,
+        admin_private_key=state.get("admin_private_key"),
+        vm_data_dir=state.get("vm_data_dir"),
+    )
 
 
 def build_parser():

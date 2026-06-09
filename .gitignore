@@ -1,5 +1,5 @@
 .build/
-provider-keys/
+vm/
 keys/
 configs/*.yaml
 !configs/*.yaml.example

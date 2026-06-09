@@ -32,24 +32,26 @@ Run these commands on the libvirt host.
 2. Create a user SSH key if you do not already have one:
 
 ```bash
-mkdir -p keys
-ssh-keygen -t ed25519 -f keys/devbox
+mkdir -p vm/keys/users
+ssh-keygen -t ed25519 -f vm/keys/users/devbox
 ```
 
-3. Copy the example config and adjust the VM name, username, and SSH key path:
+3. Optional: adjust the default local data paths or guest image defaults in `vmctl.yaml`.
+
+4. Copy the example config and adjust the VM name, username, and SSH key path:
 
 ```bash
 cp configs/template.yaml.example configs/devbox.yaml
 nano configs/devbox.yaml
 ```
 
-4. Create the VM:
+5. Create the VM:
 
 ```bash
 ./vmctl create configs/devbox.yaml
 ```
 
-5. Connect as the admin user after the VM comes up:
+6. Connect as the admin user after the VM comes up:
 
 ```bash
 ./vmssh-admin devbox
@@ -59,6 +61,33 @@ If your config forwards guest port `22`, tenant access will look like this:
 
 ```bash
 ssh myuser@HOST_IP -p 2222
+```
+
+## Typical Usage
+
+- For a third-party tenant, the value you need before provisioning is normally their public SSH key.
+- When possible, add the tenant's public key before `./vmctl create` so the tenant can sign in immediately after the VM comes up.
+- If the tenant public key is not available yet, you can omit `ssh_key_file` during creation. The tenant account is still created, and an administrator can add the public key later over the admin SSH path.
+
+Typical flow when you already have the tenant public key and using default key paths:
+
+```bash
+mkdir -p vm/keys/users
+cp /path/to/tenant.pub vm/keys/users/devbox.pub
+
+nano configs/devbox.yaml
+
+./vmctl create configs/devbox.yaml
+```
+
+If you do not have the tenant public key yet:
+
+```bash
+nano configs/devbox.yaml
+# omit ssh_key_file for now
+
+./vmctl create configs/devbox.yaml
+./vmssh-admin devbox
 ```
 
 ---
@@ -71,6 +100,7 @@ ROOT
 ├── test
 ├── vmctl
 ├── vmssh-admin
+├── vmctl.yaml
 ├── scripts/
 │   ├── test
 │   ├── coverage
@@ -106,6 +136,7 @@ ROOT
 │   ├── test_cli.py
 │   ├── test_config.py
 │   ├── test_firewall.py
+│   ├── test_integration.py
 │   ├── test_network.py
 │   └── test_provision.py
 │
@@ -113,18 +144,25 @@ ROOT
 │   ├── template.yaml.example
 │   └── *.yaml
 │
-├── keys/
-│   └── *.pub
-│
-├── provider-keys/
-│   └── ...
+├── vm/
+│   ├── data/
+│   │   └── <vm>/
+│   │       ├── user-data
+│   │       └── meta-data
+│   ├── state/
+│   │   └── <vm>.yaml
+│   └── keys/
+│       ├── admin/
+│       │   ├── <vm>_admin_ed25519
+│       │   └── <vm>_admin_ed25519.pub
+│       └── users/
+│           └── *.pub
 │
 ├── .build/
-│   ├── coverage/
-│   │   ├── .coverage
-│   │   ├── coverage.xml
-│   │   └── html/
-│   └── ...
+│   └── coverage/
+│       ├── .coverage
+│       ├── coverage.xml
+│       └── html/
 │
 └── README.md
 ```
@@ -136,20 +174,20 @@ ROOT
 | test | Full local verification runner |
 | vmctl | CLI launcher |
 | vmssh-admin | Admin SSH launcher |
+| vmctl.yaml | Global default path configuration |
 | setup | Project setup script |
 | scripts/lint | Ruff lint runner |
-| scripts/test | Unit test runner |
-| scripts/coverage | Coverage runner |
+| scripts/test | Python test suite runner |
+| scripts/coverage | Coverage runner for the Python test suite |
 | scripts/docs-build | Sphinx HTML builder |
 | pyproject.toml | Project metadata and tool configuration |
 | .github/workflows | CI/CD automation |
 | homelab_vm_provisioner | Main Python package |
 | docs | Sphinx documentation source |
-| tests | Unit tests |
+| tests | Unit and integration tests |
 | configs | VM definitions |
-| keys | User public keys |
-| provider-keys | Generated administrator keypairs |
-| .build | Generated cloud-init and coverage artifacts |
+| vm | Default VM data, state, and key directories |
+| .build | Coverage artifacts |
 | README.md | Documentation |
 
 ---
@@ -168,7 +206,9 @@ Python-only setup:
 ./setup --skip-system-packages
 ```
 
-Supported distros: Debian/Ubuntu, Fedora, RHEL/Rocky/AlmaLinux, Arch Linux.
+Supported host distros: Debian/Ubuntu, Fedora, RHEL/Rocky/AlmaLinux, Arch Linux.
+
+Default guest image: Debian 12 cloud image. You can override the guest image URL, cached filename, and libvirt `os_variant` globally or per VM.
 
 ---
 
@@ -192,7 +232,7 @@ cp configs/template.yaml.example configs/my-vm.yaml
 ./vmctl destroy devbox
 ```
 
-This removes the VM, attached libvirt storage, VM-specific libvirt network, VM-specific firewalld state, generated admin keys, and generated `.build/` artifacts.
+This removes the VM, attached libvirt storage, VM-specific libvirt network, VM-specific firewalld state, generated files under the VM data directory, generated admin keys, and the tracked state file.
 
 ## SSH to a VM as administrator
 
@@ -200,7 +240,7 @@ This removes the VM, attached libvirt storage, VM-specific libvirt network, VM-s
 ./vmssh-admin devbox
 ```
 
-Run it on the libvirt host. The helper uses the generated key in `provider-keys/` and asks libvirt for the VM's current IP. If IP discovery is unavailable, you can override it:
+Run it on the libvirt host. The helper uses the generated key path tracked in `vm/state/` and asks libvirt for the VM's current IP. If IP discovery is unavailable, you can override it:
 
 ```bash
 ./vmssh-admin devbox --ip 192.168.1.50
@@ -216,9 +256,34 @@ Install dev tools:
 ./setup --dev
 ```
 
+## Global Config
+
+Project-wide default data paths live in `vmctl.yaml`:
+
+```yaml
+paths:
+  vm_data_dir: vm/data
+  vm_state_dir: vm/state
+  user_key_dir: vm/keys/users
+  admin_key_dir: vm/keys/admin
+
+image:
+  name: debian-12-generic-amd64.qcow2
+  url: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
+  os_variant: debian12
+```
+
+These defaults are used for:
+
+- rendered local VM artifacts in `vm/data/<vm>/`
+- persisted teardown state in `vm/state/<vm>.yaml`
+- user public key lookup in `vm/keys/users/`
+- generated admin keypairs in `vm/keys/admin/`
+- guest image download URL, cached filename, and libvirt OS variant
+
 CI/CD:
 
-- runs lint and tests across Python 3.10, 3.11, and 3.12
+- runs lint plus Python unit and integration tests across Python 3.10, 3.11, and 3.12
 - enforces a coverage threshold
 - builds the Sphinx docs
 - uploads the HTML coverage artifact from the coverage job
@@ -231,7 +296,7 @@ CI/CD:
 ./test
 ```
 
-This runs lint, unit tests, coverage, and the docs build.
+This runs lint, the Python test suite, and coverage.
 
 ## Build docs
 
@@ -245,17 +310,27 @@ HTML output:
 docs/_build/html/
 ```
 
-## Run unit tests
+## Run Python tests
 
 ```bash
 ./scripts/test
 ```
+
+This discovers both unit and integration tests under `tests/`.
+
+## Integration tests
+
+Integration coverage lives in `tests/test_integration.py`.
+
+It exercises `create`, `destroy`, and `ssh-admin` through `cli.main()` while faking host-side commands such as `virsh`, `ssh`, image creation, and firewalld calls.
 
 ## Run coverage
 
 ```bash
 ./scripts/coverage
 ```
+
+This runs the same Python test suite under coverage.
 
 HTML output:
 
@@ -291,7 +366,7 @@ Or directly:
 vm:
   name: devbox
   user: matt
-  ssh_key_file: ./keys/matt.pub
+  ssh_key_file: matt.pub
 
 network:
   mode: nat-auto
@@ -313,6 +388,8 @@ ports:
 | Section | Required | Default | Description |
 |----------|----------|----------|----------|
 | vm | Yes | N/A | VM settings |
+| paths | No | {} | Local artifact directory overrides |
+| image | No | {} | Guest cloud image and libvirt distro settings |
 | network | No | nat-auto | Networking configuration |
 | packages | No | [] | Packages installed during first boot |
 | ports | No | [] | NAT port forwarding rules |
@@ -325,7 +402,7 @@ ports:
 vm:
   name: devbox
   user: matt
-  ssh_key_file: ./keys/matt.pub
+  ssh_key_file: matt.pub
 
   ram_mb: 8192
   vcpus: 4
@@ -342,7 +419,7 @@ vm:
 |----------|----------|----------|----------|----------|
 | name | Yes | string | N/A | VM name |
 | user | Yes | string | N/A | User account created inside VM |
-| ssh_key_file | Yes | string | N/A | User public key |
+| ssh_key_file | No | string | None | Tenant public key. Bare filenames resolve under `vm/keys/users/` by default |
 | ram_mb | Yes | integer | N/A | Memory allocation |
 | vcpus | Yes | integer | N/A | Virtual CPUs |
 | disk_gb | Yes | integer | N/A | Disk size |
@@ -356,6 +433,52 @@ vm:
 |----------|----------|
 | trusted | Full network access |
 | untrusted | Private networks blocked |
+
+## paths Section
+
+### Example
+
+```yaml
+paths:
+  vm_data_dir: vm/data/devbox
+```
+
+### Fields
+
+| Field | Required | Type | Default | Description |
+|----------|----------|----------|----------|----------|
+| vm_data_dir | No | string | `vm/data/<vm-name>` | Local directory for rendered cloud-init files and other per-VM local artifacts |
+
+Notes:
+
+- Relative `vm_data_dir` values resolve from the project root.
+- Persisted state is always stored separately in `vm/state/<vm-name>.yaml`.
+- Global defaults for VM data, state, and key directories come from `vmctl.yaml`.
+
+## image Section
+
+### Example
+
+```yaml
+image:
+  url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+  os_variant: ubuntu24.04
+  name: noble-server-cloudimg-amd64.img
+```
+
+### Fields
+
+| Field | Required | Type | Default | Description |
+|----------|----------|----------|----------|----------|
+| url | No | string | Debian 12 cloud image URL from `vmctl.yaml` | Download URL for the guest cloud image |
+| os_variant | No | string | `debian12` | Libvirt OS variant passed to `virt-install` |
+| name | No | string | Derived from `url` when overridden, otherwise from `vmctl.yaml` | Local cached filename under the image directory |
+
+Notes:
+
+- Global image defaults live in `vmctl.yaml` under `image:`.
+- Per-VM `image:` settings override the global image settings.
+- If you override `url` and omit `name`, the cached filename is derived from the URL.
 
 ---
 
@@ -516,10 +639,14 @@ Automatically created for every VM.
 Generated files:
 
 ```text
-provider-keys/
-├── devbox_provider_ed25519
-└── devbox_provider_ed25519.pub
+vm/keys/admin/
+├── devbox_admin_ed25519
+└── devbox_admin_ed25519.pub
 ```
+
+Rendered `user-data` and `meta-data` files for the VM are stored under `vm/data/devbox/` by default.
+
+Tenant public keys are optional at create time. If `ssh_key_file` is omitted, the tenant user is still created and an administrator can add the tenant key later.
 
 ---
 
@@ -531,7 +658,7 @@ provider-keys/
 vm:
   name: devbox
   user: matt
-  ssh_key_file: ./keys/matt.pub
+  ssh_key_file: matt.pub
 
   ram_mb: 8192
   vcpus: 4
@@ -556,7 +683,7 @@ packages:
 vm:
   name: web-service
   user: deploy
-  ssh_key_file: ./keys/deploy.pub
+  ssh_key_file: deploy.pub
 
   ram_mb: 4096
   vcpus: 2
@@ -579,7 +706,7 @@ ports:
 vm:
   name: container-host
   user: operator
-  ssh_key_file: ./keys/operator.pub
+  ssh_key_file: operator.pub
 
   ram_mb: 6144
   vcpus: 4
@@ -600,24 +727,3 @@ ports:
 
 ---
 
-# Typical Workflow
-
-```bash
-ssh-keygen -t ed25519 -f keys/devbox
-
-nano configs/devbox.yaml
-
-./vmctl create configs/devbox.yaml
-```
-
-User access:
-
-```bash
-ssh matt@HOST_IP -p 2222
-```
-
-Administrator access:
-
-```bash
-./vmssh-admin devbox
-```

@@ -6,41 +6,48 @@ from unittest.mock import call, patch
 from homelab_vm_provisioner import provision
 
 
-class ProviderKeypairTests(unittest.TestCase):
+class AdminKeypairTests(unittest.TestCase):
     def test_generates_missing_keypair(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            provider_dir = Path(tmpdir)
+            admin_dir = Path(tmpdir)
 
             def fake_run(cmd, sudo=False, check=True):
                 key_path = Path(cmd[cmd.index("-f") + 1])
                 key_path.write_text("private", encoding="utf-8")
                 Path(str(key_path) + ".pub").write_text(
-                    "ssh-ed25519 AAA provider-demo\n",
+                    "ssh-ed25519 AAA admin-demo\n",
                     encoding="utf-8",
                 )
 
-            with patch.object(provision, "PROVIDER_KEY_DIR", provider_dir), patch.object(
-                provision, "run", side_effect=fake_run
-            ) as run_mock:
-                key_path, public_key = provision.provider_keypair("demo")
+            with patch.object(provision, "run", side_effect=fake_run) as run_mock:
+                key_path, public_key = provision.admin_keypair(
+                    "demo", admin_key_dir=admin_dir
+                )
 
-        self.assertEqual(key_path, provider_dir / "demo_provider_ed25519")
-        self.assertEqual(public_key, "ssh-ed25519 AAA provider-demo")
+        self.assertEqual(key_path, admin_dir / "demo_admin_ed25519")
+        self.assertEqual(public_key, "ssh-ed25519 AAA admin-demo")
         run_mock.assert_called_once()
+
+    def test_admin_private_key_path_uses_default_admin_dir(self):
+        with patch.object(provision, "default_admin_key_dir", return_value=Path("/keys/admin")):
+            self.assertEqual(
+                provision.admin_private_key_path("demo"),
+                Path("/keys/admin/demo_admin_ed25519"),
+            )
 
     def test_reuses_existing_keypair(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            provider_dir = Path(tmpdir)
-            key_path = provider_dir / "demo_provider_ed25519"
-            pub_path = provider_dir / "demo_provider_ed25519.pub"
-            provider_dir.mkdir(exist_ok=True)
+            admin_dir = Path(tmpdir)
+            key_path = admin_dir / "demo_admin_ed25519"
+            pub_path = admin_dir / "demo_admin_ed25519.pub"
+            admin_dir.mkdir(exist_ok=True)
             key_path.write_text("private", encoding="utf-8")
             pub_path.write_text("ssh-ed25519 AAA existing\n", encoding="utf-8")
 
-            with patch.object(provision, "PROVIDER_KEY_DIR", provider_dir), patch.object(
-                provision, "run"
-            ) as run_mock:
-                returned_key_path, public_key = provision.provider_keypair("demo")
+            with patch.object(provision, "run") as run_mock:
+                returned_key_path, public_key = provision.admin_keypair(
+                    "demo", admin_key_dir=admin_dir
+                )
 
         self.assertEqual(returned_key_path, key_path)
         self.assertEqual(public_key, "ssh-ed25519 AAA existing")
@@ -50,54 +57,92 @@ class ProviderKeypairTests(unittest.TestCase):
 class TemplateRenderTests(unittest.TestCase):
     def test_render_templates_writes_cloud_init_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            build_dir = Path(tmpdir) / "demo"
+            vm_data_dir = Path(tmpdir) / "demo"
 
-            with patch.object(provision, "build_dir_for_vm", return_value=build_dir):
-                user_data, meta_data = provision.render_templates(
-                    {
-                        "vm_name": "demo",
-                        "provider_user": "vmadmin",
-                        "provider_public_key": "ssh-ed25519 AAA provider",
-                        "vm_user": "tenant",
-                        "vm_public_key": "ssh-ed25519 AAA tenant",
-                        "vm_sudo": "false",
-                        "packages": ["htop"],
-                    },
-                    "base",
-                )
+            user_data, meta_data = provision.render_templates(
+                {
+                    "vm_name": "demo",
+                    "admin_user": "vmadmin",
+                    "admin_public_key": "ssh-ed25519 AAA admin",
+                    "vm_user": "tenant",
+                    "vm_public_key": "ssh-ed25519 AAA tenant",
+                    "vm_sudo": "false",
+                    "packages": ["htop"],
+                },
+                "base",
+                vm_data_dir,
+            )
 
             self.assertTrue(user_data.exists())
             self.assertTrue(meta_data.exists())
             self.assertIn("tenant", user_data.read_text(encoding="utf-8"))
             self.assertIn("instance-id: demo", meta_data.read_text(encoding="utf-8"))
 
+    def test_render_templates_skips_tenant_authorized_keys_when_key_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vm_data_dir = Path(tmpdir) / "demo"
+
+            user_data, _ = provision.render_templates(
+                {
+                    "vm_name": "demo",
+                    "admin_user": "vmadmin",
+                    "admin_public_key": "ssh-ed25519 AAA admin",
+                    "vm_user": "tenant",
+                    "vm_public_key": None,
+                    "vm_sudo": "false",
+                    "packages": [],
+                },
+                "base",
+                vm_data_dir,
+            )
+
+            rendered = user_data.read_text(encoding="utf-8")
+
+        self.assertIn("- name: tenant", rendered)
+        self.assertEqual(rendered.count("ssh_authorized_keys:"), 1)
+
 
 class ImageAndDiskTests(unittest.TestCase):
     def test_ensure_base_image_downloads_when_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             img_dir = Path(tmpdir)
+            image_settings = {
+                "name": "ubuntu-24.04.img",
+                "url": "https://example.invalid/images/ubuntu-24.04.img",
+                "os_variant": "ubuntu24.04",
+            }
             with patch.object(provision, "IMG_DIR", img_dir), patch.object(
                 provision, "run"
             ) as run_mock:
-                base_img = provision.ensure_base_image()
+                base_img = provision.ensure_base_image(image_settings)
 
-        self.assertEqual(base_img, img_dir / provision.BASE_IMG_NAME)
+        self.assertEqual(base_img, img_dir / "ubuntu-24.04.img")
         run_mock.assert_called_once_with(
-            ["wget", "-O", str(img_dir / provision.BASE_IMG_NAME), provision.BASE_IMG_URL],
+            [
+                "wget",
+                "-O",
+                str(img_dir / "ubuntu-24.04.img"),
+                "https://example.invalid/images/ubuntu-24.04.img",
+            ],
             sudo=True,
         )
 
     def test_ensure_base_image_reuses_existing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             img_dir = Path(tmpdir)
-            base_img = img_dir / provision.BASE_IMG_NAME
+            base_img = img_dir / "ubuntu-24.04.img"
             img_dir.mkdir(exist_ok=True)
             base_img.write_text("image", encoding="utf-8")
+            image_settings = {
+                "name": "ubuntu-24.04.img",
+                "url": "https://example.invalid/images/ubuntu-24.04.img",
+                "os_variant": "ubuntu24.04",
+            }
 
             with patch.object(provision, "IMG_DIR", img_dir), patch.object(
                 provision, "run"
             ) as run_mock:
-                resolved = provision.ensure_base_image()
+                resolved = provision.ensure_base_image(image_settings)
 
         self.assertEqual(resolved, base_img)
         run_mock.assert_not_called()
@@ -129,6 +174,22 @@ class ImageAndDiskTests(unittest.TestCase):
             ],
             sudo=True,
         )
+
+    def test_create_vm_disk_reuses_existing_disk(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img_dir = Path(tmpdir)
+            base_img = img_dir / "base.qcow2"
+            base_img.write_text("base", encoding="utf-8")
+            vm_disk = img_dir / "demo.qcow2"
+            vm_disk.write_text("disk", encoding="utf-8")
+
+            with patch.object(provision, "IMG_DIR", img_dir), patch.object(
+                provision, "run"
+            ) as run_mock:
+                resolved = provision.create_vm_disk("demo", 40, base_img)
+
+        self.assertEqual(resolved, vm_disk)
+        run_mock.assert_not_called()
 
     def test_create_seed_iso_runs_cloud_localds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -187,6 +248,32 @@ class LibvirtProvisionTests(unittest.TestCase):
                 ],
             )
 
+    def test_create_nat_network_returns_when_network_already_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def fake_path(path_str):
+                if path_str == "/tmp":
+                    return Path(tmpdir)
+                return Path(path_str)
+
+            with patch.object(provision, "Path", side_effect=fake_path), patch.object(
+            provision.subprocess,
+            "run",
+            return_value=type("Result", (), {"returncode": 0})(),
+            ), patch.object(provision, "run") as run_mock:
+                provision.create_nat_network(
+                    "demo",
+                    {
+                        "name": "demo-net",
+                        "gateway": "192.168.240.1",
+                        "mac": "52:54:00:aa:bb:cc",
+                        "vm_ip": "192.168.240.50",
+                        "dhcp_start": "192.168.240.50",
+                        "dhcp_end": "192.168.240.99",
+                    },
+                )
+
+        run_mock.assert_not_called()
+
     def test_vm_exists_reflects_subprocess_status(self):
         with patch.object(
             provision.subprocess,
@@ -206,7 +293,14 @@ class LibvirtProvisionTests(unittest.TestCase):
         with patch.object(provision, "vm_exists", return_value=True), patch.object(
             provision, "run"
         ) as run_mock:
-            provision.virt_install("demo", {}, "network=demo", Path("/vm.qcow2"), Path("/seed.iso"))
+            provision.virt_install(
+                "demo",
+                {},
+                "network=demo",
+                Path("/vm.qcow2"),
+                Path("/seed.iso"),
+                "ubuntu24.04",
+            )
 
         run_mock.assert_not_called()
 
@@ -221,29 +315,87 @@ class LibvirtProvisionTests(unittest.TestCase):
                 "network=demo-net,model=virtio,mac=52:54:00:aa:bb:cc",
                 Path("/images/demo.qcow2"),
                 Path("/images/demo-seed.iso"),
+                "ubuntu24.04",
             )
 
-        run_mock.assert_called_once()
+        run_mock.assert_called_once_with(
+            [
+                "virt-install",
+                "--name",
+                "demo",
+                "--memory",
+                "4096",
+                "--vcpus",
+                "2",
+                "--disk",
+                f"path={Path('/images/demo.qcow2')},format=qcow2,bus=virtio",
+                "--disk",
+                f"path={Path('/images/demo-seed.iso')},device=cdrom",
+                "--os-variant",
+                "ubuntu24.04",
+                "--network",
+                "network=demo-net,model=virtio,mac=52:54:00:aa:bb:cc",
+                "--graphics",
+                "none",
+                "--import",
+                "--noautoconsole",
+            ],
+            sudo=True,
+        )
 
 
 class CleanupTests(unittest.TestCase):
-    def test_cleanup_local_vm_artifacts_removes_keys_and_build_dir(self):
+    def test_cleanup_local_vm_artifacts_removes_keys_vm_data_and_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
-            key_path = tmpdir_path / "demo_provider_ed25519"
+            vm_data_dir = tmpdir_path / "vm-data" / "demo"
+            vm_data_dir.mkdir(parents=True)
+            key_path = vm_data_dir / "demo_admin_ed25519"
             key_path.write_text("private", encoding="utf-8")
             pub_path = Path(str(key_path) + ".pub")
             pub_path.write_text("public", encoding="utf-8")
-            build_dir = tmpdir_path / "build" / "demo"
-            build_dir.mkdir(parents=True)
-            (build_dir / "state.yaml").write_text("state", encoding="utf-8")
 
-            with patch.object(provision, "build_dir_for_vm", return_value=build_dir):
-                provision.cleanup_local_vm_artifacts("demo", provider_private_key=key_path)
+            with patch.object(provision, "delete_vm_state") as delete_state_mock:
+                provision.cleanup_local_vm_artifacts(
+                    "demo",
+                    admin_private_key=key_path,
+                    vm_data_dir=vm_data_dir,
+                )
 
         self.assertFalse(key_path.exists())
         self.assertFalse(pub_path.exists())
-        self.assertFalse(build_dir.exists())
+        self.assertFalse(vm_data_dir.exists())
+        delete_state_mock.assert_called_once_with("demo")
+
+    def test_cleanup_local_vm_artifacts_uses_default_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            admin_key_dir = Path(tmpdir) / "vm" / "keys" / "admin"
+            admin_key_dir.mkdir(parents=True)
+            key_path = admin_key_dir / "demo_admin_ed25519"
+            key_path.write_text("private", encoding="utf-8")
+            Path(str(key_path) + ".pub").write_text("public", encoding="utf-8")
+
+            vm_data_dir = Path(tmpdir) / "vm" / "data" / "demo"
+            vm_data_dir.mkdir(parents=True)
+            (vm_data_dir / "user-data").write_text("user", encoding="utf-8")
+
+            with patch.object(provision, "default_vm_data_dir", return_value=vm_data_dir), patch.object(
+                provision, "admin_private_key_path", return_value=key_path
+            ), patch.object(provision, "delete_vm_state") as delete_state_mock:
+                provision.cleanup_local_vm_artifacts("demo")
+
+        self.assertFalse(key_path.exists())
+        self.assertFalse(Path(str(key_path) + ".pub").exists())
+        self.assertFalse(vm_data_dir.exists())
+        delete_state_mock.assert_called_once_with("demo")
+
+    def test_cleanup_local_vm_artifacts_tolerates_missing_files(self):
+        with patch.object(provision, "default_vm_data_dir", return_value=Path("/missing/vm-data")), patch.object(
+            provision, "admin_private_key_path", return_value=Path("/missing/demo_admin_ed25519")
+        ), patch.object(provision, "delete_vm_state") as delete_state_mock:
+            provision.cleanup_local_vm_artifacts("demo")
+
+        delete_state_mock.assert_called_once_with("demo")
 
     def test_cleanup_vm_storage_removes_both_images(self):
         with patch.object(provision, "run") as run_mock:

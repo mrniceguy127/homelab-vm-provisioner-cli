@@ -24,5 +24,34 @@ Developer Setup
 
    ./setup --dev
    ./test
-   ./lint
-   make -C docs html
+
+``./test`` runs lint, the Python test suite, and coverage.
+
+Project-wide default data paths live in ``vmctl.yaml``.
+
+By default:
+
+- local VM artifacts are written under ``vm/data/<vm>/``
+- persisted state is tracked in ``vm/state/<vm>.yaml``
+- user public keys are resolved from ``vm/keys/users/``
+- generated admin keys are written under ``vm/keys/admin/``
+- the guest image defaults to the Debian 12 cloud image with libvirt
+  ``os_variant`` set to ``debian12``
+
+Tenant public keys are recommended when available before provisioning, but they
+are optional. If ``vm.ssh_key_file`` is omitted, the tenant account is still
+created and an administrator can add the key later.
+
+Global image defaults live in ``vmctl.yaml`` under ``image:``, and a VM config
+can override them with its own ``image:`` block.
+
+Set ``paths.vm_data_dir`` in a VM config to override the local artifact
+directory for one VM.
+
+Run the pieces individually when needed:
+
+.. code-block:: bash
+
+   ./scripts/test
+   ./scripts/coverage
+   ./scripts/docs-build

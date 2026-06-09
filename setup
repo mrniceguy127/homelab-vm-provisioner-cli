@@ -178,5 +178,5 @@ fi
 log "Setup complete"
 printf 'Run ./vmctl, ./vmssh-admin, and ./scripts/test without activating the venv.\n'
 if [[ "$INSTALL_DEV_DEPS" -eq 1 ]]; then
-    printf 'Run ./test for the full dev suite, or use ./scripts/lint, ./scripts/coverage, and ./scripts/docs-build individually.\n'
+    printf 'Run ./test for lint, Python tests, and coverage, or use ./scripts/test, ./scripts/coverage, and ./scripts/docs-build individually.\n'
 fi

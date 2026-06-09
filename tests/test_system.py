@@ -79,3 +79,11 @@ class RequireToolsTests(unittest.TestCase):
                 system.require_tools(["virsh", "wget"])
 
         self.assertEqual(exc.exception.code, 1)
+
+    def test_uses_default_required_tools_when_none_are_passed(self):
+        with patch.object(system, "DEFAULT_REQUIRED_TOOLS", ("virsh",)), patch.object(
+            system, "tool_exists", return_value=True
+        ) as tool_exists_mock:
+            self.assertIsNone(system.require_tools())
+
+        tool_exists_mock.assert_called_once_with("virsh")

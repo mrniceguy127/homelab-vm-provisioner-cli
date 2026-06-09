@@ -6,42 +6,42 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from .config import build_dir_for_vm
+from .config import default_admin_key_dir, default_vm_data_dir, delete_vm_state
 from .constants import (
-    BASE_IMG_NAME,
-    BASE_IMG_URL,
     IMG_DIR,
-    OS_VARIANT,
-    PROVIDER_KEY_DIR,
     TEMPLATES_DIR,
 )
 from .system import run
 
 
-def provider_private_key_path(vm_name):
+def admin_private_key_path(vm_name, admin_key_dir=None):
     """Return the admin private key path for a VM.
 
     Args:
         vm_name: VM name.
+        admin_key_dir: Optional directory override for generated admin keys.
 
     Returns:
-        Path: Private key path in ``provider-keys/``.
+        Path: Private key path inside the admin key directory.
     """
-    return PROVIDER_KEY_DIR / f"{vm_name}_provider_ed25519"
+    key_dir = Path(admin_key_dir) if admin_key_dir is not None else default_admin_key_dir()
+    return key_dir / f"{vm_name}_admin_ed25519"
 
 
-def provider_keypair(vm_name):
+def admin_keypair(vm_name, admin_key_dir=None):
     """Ensure the per-VM admin SSH keypair exists.
 
     Args:
         vm_name: VM name.
+        admin_key_dir: Optional directory override for generated admin keys.
 
     Returns:
         tuple[Path, str]: Private key path and public key contents.
     """
-    PROVIDER_KEY_DIR.mkdir(mode=0o700, exist_ok=True)
+    key_dir = Path(admin_key_dir) if admin_key_dir is not None else default_admin_key_dir()
+    key_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    key_path = provider_private_key_path(vm_name)
+    key_path = admin_private_key_path(vm_name, admin_key_dir=key_dir)
     pub_path = Path(str(key_path) + ".pub")
     if not key_path.exists():
         run(
@@ -54,7 +54,7 @@ def provider_keypair(vm_name):
                 "-N",
                 "",
                 "-C",
-                f"provider-{vm_name}",
+                f"admin-{vm_name}",
             ]
         )
 
@@ -63,12 +63,13 @@ def provider_keypair(vm_name):
     return key_path, pub_path.read_text(encoding="utf-8").strip()
 
 
-def render_templates(context, template_name):
+def render_templates(context, template_name, vm_data_dir):
     """Render cloud-init templates for a VM.
 
     Args:
         context: Template variables for the VM.
         template_name: Base template name without the ``-user-data`` suffix.
+        vm_data_dir: Directory for rendered local VM artifacts.
 
     Returns:
         tuple[Path, Path]: Rendered ``user-data`` and ``meta-data`` file paths.
@@ -77,26 +78,29 @@ def render_templates(context, template_name):
     user_data = env.get_template(f"{template_name}-user-data.yaml.j2").render(**context)
     meta_data = env.get_template("meta-data.yaml.j2").render(**context)
 
-    build_dir = build_dir_for_vm(context["vm_name"])
-    build_dir.mkdir(parents=True, exist_ok=True)
+    vm_data_dir = Path(vm_data_dir)
+    vm_data_dir.mkdir(parents=True, exist_ok=True)
 
-    user_data_path = build_dir / "user-data"
-    meta_data_path = build_dir / "meta-data"
+    user_data_path = vm_data_dir / "user-data"
+    meta_data_path = vm_data_dir / "meta-data"
     user_data_path.write_text(user_data, encoding="utf-8")
     meta_data_path.write_text(meta_data, encoding="utf-8")
     return user_data_path, meta_data_path
 
 
-def ensure_base_image():
+def ensure_base_image(image_settings):
     """Ensure the base cloud image exists locally.
+
+    Args:
+        image_settings: Effective image settings for the VM.
 
     Returns:
         Path: Base image path.
     """
     IMG_DIR.mkdir(parents=True, exist_ok=True)
-    base_img = IMG_DIR / BASE_IMG_NAME
+    base_img = IMG_DIR / image_settings["name"]
     if not base_img.exists():
-        run(["wget", "-O", str(base_img), BASE_IMG_URL], sudo=True)
+        run(["wget", "-O", str(base_img), image_settings["url"]], sudo=True)
     return base_img
 
 
@@ -210,7 +214,7 @@ def vm_exists(vm_name):
     return result.returncode == 0
 
 
-def virt_install(vm_name, vm, network_arg, vm_disk, seed_iso):
+def virt_install(vm_name, vm, network_arg, vm_disk, seed_iso, os_variant):
     """Create a VM with ``virt-install``.
 
     Args:
@@ -219,6 +223,7 @@ def virt_install(vm_name, vm, network_arg, vm_disk, seed_iso):
         network_arg: Rendered ``virt-install --network`` argument.
         vm_disk: VM disk path.
         seed_iso: Seed ISO path.
+        os_variant: Libvirt OS variant identifier for the guest image.
     """
     if vm_exists(vm_name):
         print(f"VM already exists: {vm_name}")
@@ -238,7 +243,7 @@ def virt_install(vm_name, vm, network_arg, vm_disk, seed_iso):
             "--disk",
             f"path={seed_iso},device=cdrom",
             "--os-variant",
-            OS_VARIANT,
+            os_variant,
             "--network",
             network_arg,
             "--graphics",
@@ -250,25 +255,31 @@ def virt_install(vm_name, vm, network_arg, vm_disk, seed_iso):
     )
 
 
-def cleanup_local_vm_artifacts(vm_name, provider_private_key=None):
+def cleanup_local_vm_artifacts(vm_name, admin_private_key=None, vm_data_dir=None):
     """Remove generated local files for a VM.
 
     Args:
         vm_name: VM name.
-        provider_private_key: Optional admin private key path override.
+        admin_private_key: Optional admin private key path override.
+        vm_data_dir: Optional VM data directory override.
     """
-    if provider_private_key is None:
-        provider_private_key = provider_private_key_path(vm_name)
+    if vm_data_dir is None:
+        vm_data_dir = default_vm_data_dir(vm_name)
 
-    key_path = Path(provider_private_key)
+    if admin_private_key is None:
+        admin_private_key = admin_private_key_path(vm_name)
+
+    key_path = Path(admin_private_key)
     pub_path = Path(str(key_path) + ".pub")
     for path in (key_path, pub_path):
         if path.exists():
             path.unlink()
 
-    build_dir = build_dir_for_vm(vm_name)
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
+    vm_data_path = Path(vm_data_dir)
+    if vm_data_path.exists():
+        shutil.rmtree(vm_data_path)
+
+    delete_vm_state(vm_name)
 
 
 def cleanup_vm_storage(vm_name):

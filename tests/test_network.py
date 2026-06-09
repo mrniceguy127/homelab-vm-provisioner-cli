@@ -31,6 +31,35 @@ class ParseIpv4FromDomifaddrTests(unittest.TestCase):
 
         self.assertIsNone(network.parse_ipv4_from_domifaddr(output))
 
+    def test_skips_short_and_invalid_ipv4_rows(self):
+        output = textwrap.dedent(
+            """\
+            Name       MAC address          Protocol     Address
+            -------------------------------------------------------------------------------
+            broken     ipv4
+            vnet0      52:54:00:aa:bb:cc    ipv4         invalid
+            """
+        )
+
+        self.assertIsNone(network.parse_ipv4_from_domifaddr(output))
+
+    def test_skips_ipv4_labeled_rows_with_non_ipv4_addresses(self):
+        output = textwrap.dedent(
+            """\
+            Name       MAC address          Protocol     Address
+            -------------------------------------------------------------------------------
+            vnet0      52:54:00:aa:bb:cc    ipv4         fd00::50/64
+            """
+        )
+
+        self.assertIsNone(network.parse_ipv4_from_domifaddr(output))
+
+
+class RandomMacTests(unittest.TestCase):
+    def test_random_mac_uses_libvirt_prefix(self):
+        mac = network.random_mac()
+        self.assertRegex(mac, r"^52:54:00:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}$")
+
 
 class ResolveVmIpv4Tests(unittest.TestCase):
     def test_uses_first_source_with_ipv4_address(self):
@@ -114,6 +143,21 @@ class ParseNetworkFromXmlTests(unittest.TestCase):
             network.parse_network_from_xml("<network><name>demo-net</name></network>", "demo")
         )
 
+    def test_returns_none_for_invalid_xml(self):
+        self.assertIsNone(network.parse_network_from_xml("<network>", "demo"))
+
+    def test_returns_none_when_ip_node_is_missing(self):
+        self.assertIsNone(
+            network.parse_network_from_xml(
+                "<network><name>demo-net</name><dhcp><host name='demo' ip='1.2.3.4'/></dhcp></network>",
+                "demo",
+            )
+        )
+
+    def test_returns_none_when_required_network_fields_are_missing(self):
+        xml_text = "<network><name>demo-net</name><ip netmask='255.255.255.0'><dhcp><host name='demo' ip='1.2.3.4'/></dhcp></ip></network>"
+        self.assertIsNone(network.parse_network_from_xml(xml_text, "demo"))
+
 
 class RoutesAndLibvirtDiscoveryTests(unittest.TestCase):
     def test_get_existing_routes_text_returns_command_output(self):
@@ -139,6 +183,14 @@ class RoutesAndLibvirtDiscoveryTests(unittest.TestCase):
                 "<network>a</network>\n<network>b</network>\n",
             )
 
+    def test_get_existing_virsh_networks_text_skips_blank_network_names(self):
+        with patch.object(
+            network.subprocess,
+            "run",
+            side_effect=[completed_process(stdout="\nnet-a\n"), completed_process(stdout="<network>a</network>")],
+        ):
+            self.assertEqual(network.get_existing_virsh_networks_text(), "<network>a</network>\n")
+
     def test_list_virsh_network_names_filters_blank_lines(self):
         with patch.object(
             network.subprocess,
@@ -146,6 +198,14 @@ class RoutesAndLibvirtDiscoveryTests(unittest.TestCase):
             return_value=completed_process(stdout="net-a\n\nnet-b\n"),
         ):
             self.assertEqual(network.list_virsh_network_names(), ["net-a", "net-b"])
+
+    def test_list_virsh_network_names_returns_empty_on_command_failure(self):
+        with patch.object(
+            network.subprocess,
+            "run",
+            return_value=completed_process(returncode=1, stdout=""),
+        ):
+            self.assertEqual(network.list_virsh_network_names(), [])
 
     def test_discover_vm_network_returns_matching_network(self):
         with patch.object(
@@ -165,6 +225,18 @@ class RoutesAndLibvirtDiscoveryTests(unittest.TestCase):
                 network.discover_vm_network("demo"),
                 {"name": "net-b", "vm_ip": "192.168.122.50"},
             )
+
+    def test_discover_vm_network_returns_none_when_no_network_matches(self):
+        with patch.object(network, "list_virsh_network_names", return_value=["net-a"]), patch.object(
+            network, "capture_or_none", return_value=None
+        ):
+            self.assertIsNone(network.discover_vm_network("demo"))
+
+    def test_subnet_appears_used_checks_routes_and_network_xml(self):
+        with patch.object(network, "get_existing_routes_text", return_value="default\n"), patch.object(
+            network, "get_existing_virsh_networks_text", return_value="prefix 192.168.240.\n"
+        ):
+            self.assertTrue(network.subnet_appears_used("192.168.240."))
 
 
 class PickFreeSubnetTests(unittest.TestCase):

@@ -5,10 +5,10 @@ from pathlib import Path
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = PACKAGE_DIR.parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
+GLOBAL_CONFIG_PATH = PROJECT_DIR / "vmctl.yaml"
 
-PROVIDER_USER = "vmadmin"
-PROVIDER_KEY_DIR = PROJECT_DIR / "provider-keys"
-BUILD_DIR = PROJECT_DIR / ".build"
+ADMIN_USER = "vmadmin"
+LEGACY_VM_BUILD_DIR = PROJECT_DIR / ".build"
 
 IMG_DIR = Path("/var/lib/libvirt/images")
 BASE_IMG_NAME = "debian-12-generic-amd64.qcow2"

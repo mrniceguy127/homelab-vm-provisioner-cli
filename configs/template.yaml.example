@@ -3,13 +3,26 @@
 vm:
   name: my-vm
   user: myuser
-  ssh_key_file: ./keys/myuser.pub
+  # Optional but recommended when the tenant public key is already available.
+  ssh_key_file: myuser.pub
   ram_mb: 4096
   vcpus: 2
   disk_gb: 40
   allow_sudo: false
   trust: untrusted
   template: base
+
+paths:
+  # Optional: override the default local VM data directory for this VM.
+  # Relative paths resolve from the project root.
+  # vm_data_dir: vm/data/my-vm
+
+image:
+  # Optional: override the guest cloud image or distro for this VM.
+  # If url is set and name is omitted, the filename is derived from the URL.
+  # url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+  # os_variant: ubuntu24.04
+  # name: noble-server-cloudimg-amd64.img
 
 network:
   mode: nat-auto

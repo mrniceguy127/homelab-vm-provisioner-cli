@@ -22,8 +22,7 @@ run_step() {
 }
 
 run_step "Running Ruff" "$ROOT_DIR/scripts/lint"
-run_step "Running unit tests" "$ROOT_DIR/scripts/test"
+run_step "Running Python tests (unit + integration)" "$ROOT_DIR/scripts/test"
 run_step "Running coverage" "$ROOT_DIR/scripts/coverage"
-run_step "Building docs" "$ROOT_DIR/scripts/docs-build"
 
 log "Full verification complete"

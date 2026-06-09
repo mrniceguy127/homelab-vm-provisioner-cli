@@ -1,0 +1,10 @@
+paths:
+  vm_data_dir: vm/data
+  vm_state_dir: vm/state
+  user_key_dir: vm/keys/users
+  admin_key_dir: vm/keys/admin
+
+image:
+  name: debian-12-generic-amd64.qcow2
+  url: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
+  os_variant: debian12

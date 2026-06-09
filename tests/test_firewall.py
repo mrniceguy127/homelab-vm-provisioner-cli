@@ -32,6 +32,18 @@ class ZoneLookupTests(unittest.TestCase):
                 "demo-zone",
             )
 
+    def test_firewalld_zone_for_cidr_returns_none_when_zones_cannot_be_listed(self):
+        with patch.object(firewall, "capture_or_none", return_value=None):
+            self.assertIsNone(firewall.firewalld_zone_for_cidr("192.168.240.0/24"))
+
+    def test_firewalld_zone_for_cidr_returns_none_when_no_zone_matches(self):
+        with patch.object(
+            firewall,
+            "capture_or_none",
+            side_effect=["public demo-zone", "10.0.0.0/8", "172.16.0.0/12"],
+        ):
+            self.assertIsNone(firewall.firewalld_zone_for_cidr("192.168.240.0/24"))
+
     def test_list_zone_forward_ports_splits_output(self):
         with patch.object(
             firewall,
@@ -48,6 +60,10 @@ class ZoneLookupTests(unittest.TestCase):
                     "port=8080:proto=tcp:toaddr=1.2.3.4:toport=80",
                 ],
             )
+
+    def test_list_zone_forward_ports_returns_empty_when_unset(self):
+        with patch.object(firewall, "capture_or_none", return_value=None):
+            self.assertEqual(firewall.list_zone_forward_ports(), [])
 
     def test_find_forward_port_rules_for_vm_filters_by_ip(self):
         with patch.object(
@@ -69,6 +85,21 @@ class ZoneLookupTests(unittest.TestCase):
                     (None, "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22"),
                     ("public", "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22"),
                 ],
+            )
+
+    def test_find_forward_port_rules_for_vm_skips_duplicate_zone_rule_pairs(self):
+        with patch.object(
+            firewall,
+            "capture_or_none",
+            return_value="demo-zone demo-zone",
+        ), patch.object(
+            firewall,
+            "list_zone_forward_ports",
+            side_effect=[[], ["port=2222:proto=tcp:toaddr=192.168.240.50:toport=22"], ["port=2222:proto=tcp:toaddr=192.168.240.50:toport=22"]],
+        ):
+            self.assertEqual(
+                firewall.find_forward_port_rules_for_vm("192.168.240.50"),
+                [("demo-zone", "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22")],
             )
 
     def test_firewalld_zone_is_empty_returns_false_on_any_data(self):
@@ -105,6 +136,57 @@ class ApplyFirewalldNatPolicyTests(unittest.TestCase):
             call(["firewall-cmd", "--permanent", "--new-zone", "demo-zone"], sudo=True),
         )
         self.assertEqual(run_mock.call_args_list[-1], call(["firewall-cmd", "--reload"], sudo=True))
+
+    def test_trusted_vm_uses_existing_zone_without_rich_rules(self):
+        with patch.object(firewall, "capture", return_value="demo-zone public"), patch.object(
+            firewall, "run"
+        ) as run_mock:
+            zone_created = firewall.apply_firewalld_nat_policy(
+                {
+                    "zone": "demo-zone",
+                    "cidr": "192.168.240.0/24",
+                    "vm_ip": "192.168.240.50",
+                },
+                "trusted",
+                [],
+            )
+
+        self.assertFalse(zone_created)
+        self.assertEqual(
+            run_mock.call_args_list,
+            [
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "demo-zone",
+                        "--add-source",
+                        "192.168.240.0/24",
+                    ],
+                    sudo=True,
+                ),
+                call(["firewall-cmd", "--reload"], sudo=True),
+            ],
+        )
+
+
+class RemoveForwardPortRuleTests(unittest.TestCase):
+    def test_remove_forward_port_rule_uses_zone_when_provided(self):
+        with patch.object(firewall, "run") as run_mock:
+            firewall.remove_forward_port_rule("port=2222:proto=tcp:toaddr=1.2.3.4:toport=22", zone="demo-zone")
+
+        run_mock.assert_called_once_with(
+            [
+                "firewall-cmd",
+                "--permanent",
+                "--zone",
+                "demo-zone",
+                "--remove-forward-port=port=2222:proto=tcp:toaddr=1.2.3.4:toport=22",
+            ],
+            sudo=True,
+            check=False,
+        )
 
 
 class CleanupFirewalldVmPolicyTests(unittest.TestCase):
@@ -228,3 +310,57 @@ class CleanupFirewalldVmPolicyTests(unittest.TestCase):
             firewall.cleanup_firewalld_vm_policy("demo", {}, [])
 
         run_mock.assert_not_called()
+
+    def test_uses_port_fallback_and_cidr_lookup_when_no_rule_scan_matches(self):
+        with patch.object(firewall, "tool_exists", return_value=True), patch.object(
+            firewall, "firewalld_zone_exists", return_value=False
+        ), patch.object(
+            firewall, "firewalld_zone_for_cidr", return_value="demo-zone"
+        ), patch.object(
+            firewall, "find_forward_port_rules_for_vm", return_value=[]
+        ), patch.object(
+            firewall, "remove_forward_port_rule"
+        ) as remove_rule_mock, patch.object(
+            firewall, "firewalld_zone_is_empty", return_value=False
+        ), patch.object(firewall, "run") as run_mock:
+            firewall.cleanup_firewalld_vm_policy(
+                "demo",
+                {
+                    "zone": "demo-zone",
+                    "cidr": "192.168.240.0/24",
+                    "vm_ip": "192.168.240.50",
+                },
+                [{"host": 2222, "guest": 22, "proto": "tcp"}],
+            )
+
+        remove_rule_mock.assert_called_once_with(
+            "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22"
+        )
+        self.assertEqual(run_mock.call_args_list[-1], call(["firewall-cmd", "--reload"], sudo=True, check=False))
+
+    def test_skips_reload_when_no_cleanup_is_needed(self):
+        with patch.object(firewall, "tool_exists", return_value=True), patch.object(
+            firewall, "firewalld_zone_exists", return_value=False
+        ), patch.object(firewall, "find_forward_port_rules_for_vm") as find_rules_mock, patch.object(
+            firewall, "run"
+        ) as run_mock:
+            firewall.cleanup_firewalld_vm_policy("demo", {}, [])
+
+        find_rules_mock.assert_not_called()
+        run_mock.assert_not_called()
+
+    def test_zone_cleanup_without_cidr_still_removes_rich_rules_and_reloads(self):
+        with patch.object(firewall, "tool_exists", return_value=True), patch.object(
+            firewall, "firewalld_zone_exists", return_value=True
+        ), patch.object(
+            firewall, "find_forward_port_rules_for_vm", return_value=[]
+        ), patch.object(
+            firewall, "firewalld_zone_is_empty", return_value=False
+        ), patch.object(firewall, "run") as run_mock:
+            firewall.cleanup_firewalld_vm_policy(
+                "demo",
+                {"zone": "demo-zone", "vm_ip": "192.168.240.50"},
+                [],
+            )
+
+        self.assertEqual(run_mock.call_args_list[-1], call(["firewall-cmd", "--reload"], sudo=True, check=False))

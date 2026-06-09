@@ -46,7 +46,7 @@ jobs:
       - name: Run Ruff
         run: ./scripts/lint
 
-      - name: Run unit tests
+      - name: Run Python tests
         run: ./scripts/test
 
   coverage:
