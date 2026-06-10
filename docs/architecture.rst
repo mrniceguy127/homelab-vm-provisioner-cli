@@ -46,4 +46,5 @@ Configuration
 - ``image`` settings in a VM config override the global guest image settings.
 - The default ``image.os_variant`` is ``generic`` to avoid host-specific libosinfo failures.
 - NAT port forwarding installs firewalld direct ``FORWARD`` accept rules at priority ``-1000`` as a host-compatibility workaround.
+- On hosts where libvirt's nft-managed ``LIBVIRT_FWI`` chain still rejects guest traffic, the firewall layer discovers the real nft table that owns ``LIBVIRT_FWI`` and inserts the guest allow rule before the bridge-specific ``reject`` rule by handle instead of assuming a fixed chain position.
 - Relative ``paths.vm_data_dir`` values resolve from the project root.

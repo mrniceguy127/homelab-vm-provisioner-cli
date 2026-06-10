@@ -14,11 +14,16 @@ class FakeHost:
     def __init__(self):
         self.vm_names = set()
         self.vm_ips = {}
+        self.vm_bridges = {}
         self.network_xml = {}
         self.zones = {"public"}
         self.zone_sources = {}
         self.zone_rich_rules = {}
         self.forward_ports = {None: set()}
+        self.firewalld_direct_rules = []
+        self.nft_rules = []
+        self.next_nft_handle = 1
+        self.nft_reject_handles = {}
         self.cli_commands = []
         self.provision_commands = []
         self.firewall_commands = []
@@ -27,12 +32,13 @@ class FakeHost:
         self.domifaddr_requests = []
 
     def create_nat_network(self, vm_name, network_config):
+        bridge_name = network_config.get("bridge_name", "virbr-demo")
         xml_text = textwrap.dedent(
             f"""\
             <network>
               <name>{network_config['name']}</name>
               <forward mode='nat'/>
-              <bridge name='virbr-demo' stp='on' delay='0'/>
+              <bridge name='{bridge_name}' stp='on' delay='0'/>
               <ip address='{network_config['gateway']}' netmask='255.255.255.0'>
                 <dhcp>
                   <host
@@ -47,6 +53,8 @@ class FakeHost:
         ).strip()
         self.network_xml[network_config["name"]] = xml_text
         self.vm_ips[vm_name] = network_config["vm_ip"]
+        self.vm_bridges[network_config["vm_ip"]] = bridge_name
+        self.nft_reject_handles.setdefault(bridge_name, str(18 + len(self.nft_reject_handles)))
 
     def cli_run(self, cmd, sudo=False, check=True):
         self.cli_commands.append((list(cmd), sudo, check))
@@ -135,6 +143,26 @@ class FakeHost:
     def firewall_capture_or_none(self, cmd, sudo=False):
         zone = self._zone_from_cmd(cmd)
 
+        if len(cmd) >= 4 and cmd[:3] == ["ip", "route", "get"]:
+            bridge_name = self.vm_bridges.get(cmd[3])
+            if bridge_name is None:
+                return None
+            return f"{cmd[3]} dev {bridge_name} src 192.168.240.1"
+        if cmd[:3] == ["nft", "list", "ruleset"]:
+            lines = ["table ip filter {", "    chain LIBVIRT_FWI {"]
+            lines.extend(["    }", "}"])
+            return "\n".join(lines)
+        if cmd[:4] == ["nft", "-a", "list", "chain"]:
+            lines = ["table ip filter {", "    chain LIBVIRT_FWI {"]
+            for handle, rule in self.nft_rules:
+                lines.append(f"        {' '.join(rule)} # handle {handle}")
+            for bridge_name, handle in self.nft_reject_handles.items():
+                lines.append(f'        oifname "{bridge_name}" reject # handle {handle}')
+            lines.extend(["    }", "}"])
+            return "\n".join(lines)
+        if cmd[:4] == ["firewall-cmd", "--permanent", "--direct", "--get-all-rules"]:
+            return "\n".join(" ".join(rule) for rule in self.firewalld_direct_rules)
+
         if cmd[-1] == "--get-zones":
             return " ".join(sorted(self.zones))
         if cmd[-1] == "--list-sources":
@@ -150,6 +178,18 @@ class FakeHost:
 
     def firewall_run(self, cmd, sudo=False, check=True):
         self.firewall_commands.append((list(cmd), sudo, check))
+        if cmd[0] == "nft":
+            if cmd[1:3] == ["insert", "rule"]:
+                rule_start = cmd.index("handle") + 2
+                self.nft_rules.append((self.next_nft_handle, cmd[rule_start:]))
+                self.next_nft_handle += 1
+            elif cmd[1:3] == ["delete", "rule"]:
+                handle = int(cmd[-1])
+                self.nft_rules = [
+                    existing for existing in self.nft_rules if existing[0] != handle
+                ]
+            return completed_process()
+
         zone = self._zone_from_cmd(cmd)
 
         if "--new-zone" in cmd:
@@ -176,6 +216,13 @@ class FakeHost:
         elif "--remove-rich-rule" in cmd:
             rule = cmd[cmd.index("--remove-rich-rule") + 1]
             self.zone_rich_rules.setdefault(zone, set()).discard(rule)
+        elif "--direct" in cmd and "--add-rule" in cmd:
+            self.firewalld_direct_rules.append(cmd[cmd.index("--add-rule") + 1 :])
+        elif "--direct" in cmd and "--remove-rule" in cmd:
+            rule = cmd[cmd.index("--remove-rule") + 1 :]
+            self.firewalld_direct_rules = [
+                existing for existing in self.firewalld_direct_rules if existing != rule
+            ]
         else:
             for part in cmd:
                 if part.startswith("--add-forward-port="):
@@ -418,50 +465,52 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn(
                 (
                     [
-                        "firewall-cmd",
-                        "--permanent",
-                        "--direct",
-                        "--add-rule",
-                        "ipv4",
+                        "nft",
+                        "insert",
+                        "rule",
+                        "ip",
                         "filter",
-                        "FORWARD",
-                        "-1000",
-                        "-p",
-                        "tcp",
-                        "-d",
+                        "LIBVIRT_FWI",
+                        "handle",
+                        "18",
+                        "oifname",
+                        "virbr-demo",
+                        "ip",
+                        "daddr",
                         "192.168.240.50",
-                        "--dport",
+                        "tcp",
+                        "dport",
                         "22",
-                        "-j",
-                        "ACCEPT",
+                        "accept",
                     ],
                     True,
-                    True,
+                    False,
                 ),
                 host.firewall_commands,
             )
             self.assertIn(
                 (
                     [
-                        "firewall-cmd",
-                        "--permanent",
-                        "--direct",
-                        "--add-rule",
-                        "ipv4",
+                        "nft",
+                        "insert",
+                        "rule",
+                        "ip",
                         "filter",
-                        "FORWARD",
-                        "-1000",
-                        "-p",
-                        "tcp",
-                        "-d",
+                        "LIBVIRT_FWI",
+                        "handle",
+                        "18",
+                        "oifname",
+                        "virbr-demo",
+                        "ip",
+                        "daddr",
                         "192.168.240.50",
-                        "--dport",
+                        "tcp",
+                        "dport",
                         "80",
-                        "-j",
-                        "ACCEPT",
+                        "accept",
                     ],
                     True,
-                    True,
+                    False,
                 ),
                 host.firewall_commands,
             )
@@ -483,22 +532,14 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn(
                 (
                     [
-                        "firewall-cmd",
-                        "--permanent",
-                        "--direct",
-                        "--remove-rule",
-                        "ipv4",
+                        "nft",
+                        "delete",
+                        "rule",
+                        "ip",
                         "filter",
-                        "FORWARD",
-                        "-1000",
-                        "-p",
-                        "tcp",
-                        "-d",
-                        "192.168.240.50",
-                        "--dport",
-                        "22",
-                        "-j",
-                        "ACCEPT",
+                        "LIBVIRT_FWI",
+                        "handle",
+                        "1",
                     ],
                     True,
                     False,
