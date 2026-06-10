@@ -415,6 +415,31 @@ class IntegrationTests(unittest.TestCase):
                     "port=8080:proto=tcp:toaddr=192.168.240.50:toport=80",
                 },
             )
+            self.assertIn(
+                (
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--direct",
+                        "--add-rule",
+                        "ipv4",
+                        "filter",
+                        "FORWARD",
+                        "0",
+                        "-p",
+                        "tcp",
+                        "-d",
+                        "192.168.240.50",
+                        "--dport",
+                        "22",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                    True,
+                    True,
+                ),
+                host.firewall_commands,
+            )
             self.assertIn("demo-zone", host.zones)
             self.assertIn("demo", host.vm_names)
 
@@ -430,6 +455,31 @@ class IntegrationTests(unittest.TestCase):
             self.assertNotIn("demo-zone", host.zones)
             self.assertEqual(host.forward_ports[None], set())
             self.assertEqual(host.vm_names, set())
+            self.assertIn(
+                (
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--direct",
+                        "--remove-rule",
+                        "ipv4",
+                        "filter",
+                        "FORWARD",
+                        "0",
+                        "-p",
+                        "tcp",
+                        "-d",
+                        "192.168.240.50",
+                        "--dport",
+                        "22",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                    True,
+                    False,
+                ),
+                host.firewall_commands,
+            )
             self.assertEqual(self.extract_virsh_actions(host.cli_commands), [
                 ["virsh", "destroy", "demo"],
                 ["virsh", "undefine", "demo", "--remove-all-storage"],

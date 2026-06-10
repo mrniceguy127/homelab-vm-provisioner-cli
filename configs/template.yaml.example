@@ -26,6 +26,12 @@ image:
   # os_variant: ubuntu24.04
   # name: noble-server-cloudimg-amd64.img
 
+dns:
+  # Optional: override guest DNS resolvers for this VM.
+  # resolvers:
+  #   - 1.1.1.1
+  #   - 1.0.0.1
+
 network:
   mode: nat-auto
 

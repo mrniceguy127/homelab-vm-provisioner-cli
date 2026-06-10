@@ -271,6 +271,11 @@ image:
   name: debian-12-generic-amd64.qcow2
   url: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
   os_variant: generic
+
+dns:
+  resolvers:
+    - 1.1.1.1
+    - 1.0.0.1
 ```
 
 These defaults are used for:
@@ -280,6 +285,7 @@ These defaults are used for:
 - user public key lookup in `vm/keys/users/`
 - generated admin keypairs in `vm/keys/admin/`
 - guest image download URL, cached filename, and libvirt OS variant
+- default guest DNS resolvers
 
 CI/CD:
 
@@ -390,8 +396,9 @@ ports:
 | vm | Yes | N/A | VM settings |
 | paths | No | {} | Local artifact directory overrides |
 | image | No | {} | Guest cloud image and libvirt distro settings |
+| dns | No | {} | Guest DNS resolver settings |
 | network | No | nat-auto | Networking configuration |
-| packages | No | [] | Packages installed during first boot |
+| packages | No | [] | Packages installed during the final guest configuration phase |
 | ports | No | [] | NAT port forwarding rules |
 
 ## vm Section
@@ -486,6 +493,29 @@ Notes:
 - `generic` is the default because some hosts do not recognize newer distro-specific IDs like `debian12`.
 - Use `virt-install --osinfo list` on the host to discover supported distro-specific `os_variant` values.
 
+## dns Section
+
+### Example
+
+```yaml
+dns:
+  resolvers:
+    - 1.1.1.1
+    - 1.0.0.1
+```
+
+### Fields
+
+| Field | Required | Type | Default | Description |
+|----------|----------|----------|----------|----------|
+| resolvers | No | list[string] | `1.1.1.1`, `1.0.0.1` | DNS resolvers written into the guest via cloud-init |
+
+Notes:
+
+- Global DNS defaults live in `vmctl.yaml` under `dns:`.
+- Per-VM `dns:` settings override the global DNS settings.
+- Resolver values must be valid IP addresses.
+
 ---
 
 # Network Configuration
@@ -523,6 +553,7 @@ Generated values:
 | VM IP | 192.168.137.50 |
 | DHCP Start | 192.168.137.50 |
 | DHCP End | 192.168.137.99 |
+| Guest resolvers | 1.1.1.1, 1.0.0.1 |
 | Network Name | `<vm>-net` |
 | Firewall Zone | `<vm>-zone` |
 | MAC Address | Random |
@@ -544,6 +575,7 @@ Generated defaults:
 | vm_ip | 192.168.240.50 |
 | dhcp_start | 192.168.240.50 |
 | dhcp_end | 192.168.240.99 |
+| guest resolvers | 1.1.1.1, 1.0.0.1 |
 
 ### Fields
 
@@ -601,6 +633,10 @@ packages:
   - htop
 ```
 
+Notes:
+
+- Packages are installed after the base guest configuration files are written, not during the earlier cloud-init package phase.
+
 ---
 
 # Port Forwarding
@@ -627,6 +663,10 @@ ports:
 | host | Yes | N/A |
 | guest | Yes | N/A |
 | proto | No | tcp |
+
+Notes:
+
+- For NAT-backed VMs, forwarded ports automatically install matching firewalld direct `FORWARD` accept rules so host and remote traffic can actually reach the guest port.
 
 ---
 

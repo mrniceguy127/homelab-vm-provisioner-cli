@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import (
     default_admin_key_dir,
+    dns_settings_for_config,
     image_settings_for_config,
     load_config,
     load_global_config,
@@ -170,6 +171,7 @@ def build_render_context(
     vm_public_key,
     allow_sudo,
     packages,
+    dns_resolvers,
 ):
     """Build the cloud-init template context for a VM.
 
@@ -181,6 +183,7 @@ def build_render_context(
             later.
         allow_sudo: Whether the tenant gets passwordless sudo.
         packages: Extra packages to install.
+        dns_resolvers: Default DNS servers configured inside the guest.
 
     Returns:
         dict: Template context for cloud-init rendering.
@@ -193,6 +196,7 @@ def build_render_context(
         "vm_public_key": vm_public_key,
         "vm_sudo": "ALL=(ALL) NOPASSWD:ALL" if allow_sudo else "false",
         "packages": packages,
+        "dns_resolvers": dns_resolvers,
     }
 
 
@@ -281,6 +285,7 @@ def create(config_path):
 
     vm_data_dir = vm_data_dir_for_config(vm_name, config_data, global_config=global_config)
     image_settings = image_settings_for_config(config_data, global_config=global_config)
+    dns_settings = dns_settings_for_config(config_data, global_config=global_config)
     validate_os_variant(image_settings["os_variant"])
     admin_private_key, admin_public_key = admin_keypair(
         vm_name,
@@ -297,6 +302,7 @@ def create(config_path):
         vm_public_key,
         allow_sudo,
         packages,
+        dns_settings["resolvers"],
     )
 
     state = {

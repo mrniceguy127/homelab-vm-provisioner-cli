@@ -1,5 +1,6 @@
 """Helpers for reading user configs and persisting VM state."""
 
+import ipaddress
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -8,6 +9,7 @@ import yaml
 from .constants import (
     BASE_IMG_NAME,
     BASE_IMG_URL,
+    DEFAULT_VM_DNS_RESOLVERS,
     GLOBAL_CONFIG_PATH,
     LEGACY_VM_BUILD_DIR,
     OS_VARIANT,
@@ -25,6 +27,10 @@ DEFAULT_IMAGE_SETTINGS = {
     "name": BASE_IMG_NAME,
     "url": BASE_IMG_URL,
     "os_variant": OS_VARIANT,
+}
+
+DEFAULT_DNS_SETTINGS = {
+    "resolvers": DEFAULT_VM_DNS_RESOLVERS,
 }
 
 
@@ -188,6 +194,54 @@ def image_settings_for_config(config_data, global_config=None):
     image_settings = _apply_image_overrides(image_settings, global_config.get("image") or {})
     image_settings = _apply_image_overrides(image_settings, config_data.get("image") or {})
     return image_settings
+
+
+def _validate_dns_resolvers(resolvers):
+    """Validate configured guest DNS resolvers.
+
+    Args:
+        resolvers: Sequence of resolver IP strings.
+
+    Returns:
+        tuple[str, ...]: Normalized resolver addresses.
+
+    Raises:
+        ValueError: If the resolver list is empty, not a sequence, or contains
+        an invalid IP address.
+    """
+    if not isinstance(resolvers, (list, tuple)):
+        raise ValueError("dns.resolvers must be a list of IP addresses")
+    if not resolvers:
+        raise ValueError("dns.resolvers must contain at least one IP address")
+
+    validated = []
+    for resolver in resolvers:
+        try:
+            validated.append(str(ipaddress.ip_address(resolver)))
+        except ValueError as exc:
+            raise ValueError(f"dns.resolvers contains an invalid IP address: {resolver}") from exc
+
+    return tuple(validated)
+
+
+def dns_settings_for_config(config_data, global_config=None):
+    """Return the effective guest DNS settings for a VM config.
+
+    Args:
+        config_data: Parsed YAML configuration.
+        global_config: Optional preloaded global configuration.
+
+    Returns:
+        dict: Effective DNS settings.
+    """
+    if global_config is None:
+        global_config = load_global_config()
+
+    dns_settings = dict(DEFAULT_DNS_SETTINGS)
+    dns_settings.update(global_config.get("dns") or {})
+    dns_settings.update(config_data.get("dns") or {})
+    dns_settings["resolvers"] = _validate_dns_resolvers(dns_settings["resolvers"])
+    return dns_settings
 
 
 def default_vm_data_root(global_config=None):

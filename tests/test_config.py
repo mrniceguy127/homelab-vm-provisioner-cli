@@ -165,6 +165,58 @@ class ImageSettingsTests(unittest.TestCase):
         self.assertEqual(image_settings["name"], "ubuntu-24.04.img")
 
 
+class DnsSettingsTests(unittest.TestCase):
+    def test_dns_settings_default_to_cloudflare_resolvers(self):
+        self.assertEqual(
+            config.dns_settings_for_config({}, global_config={}),
+            {"resolvers": ("1.1.1.1", "1.0.0.1")},
+        )
+
+    def test_global_dns_override_is_applied(self):
+        self.assertEqual(
+            config.dns_settings_for_config(
+                {},
+                global_config={"dns": {"resolvers": ["9.9.9.9", "149.112.112.112"]}},
+            ),
+            {"resolvers": ("9.9.9.9", "149.112.112.112")},
+        )
+
+    def test_vm_dns_override_beats_global_dns_settings(self):
+        self.assertEqual(
+            config.dns_settings_for_config(
+                {"dns": {"resolvers": ["8.8.8.8", "8.8.4.4"]}},
+                global_config={"dns": {"resolvers": ["9.9.9.9"]}},
+            ),
+            {"resolvers": ("8.8.8.8", "8.8.4.4")},
+        )
+
+    def test_dns_settings_load_global_config_when_not_provided(self):
+        with patch.object(
+            config,
+            "load_global_config",
+            return_value={"dns": {"resolvers": ["8.8.8.8"]}},
+        ) as load_global_config_mock:
+            dns_settings = config.dns_settings_for_config({})
+
+        load_global_config_mock.assert_called_once_with()
+        self.assertEqual(dns_settings, {"resolvers": ("8.8.8.8",)})
+
+    def test_dns_settings_reject_non_list_values(self):
+        with self.assertRaisesRegex(ValueError, "dns.resolvers must be a list"):
+            config.dns_settings_for_config({"dns": {"resolvers": "1.1.1.1"}}, global_config={})
+
+    def test_dns_settings_reject_empty_lists(self):
+        with self.assertRaisesRegex(ValueError, "dns.resolvers must contain at least one"):
+            config.dns_settings_for_config({"dns": {"resolvers": []}}, global_config={})
+
+    def test_dns_settings_reject_invalid_ip_addresses(self):
+        with self.assertRaisesRegex(ValueError, "dns.resolvers contains an invalid IP address"):
+            config.dns_settings_for_config(
+                {"dns": {"resolvers": ["1.1.1.1", "bad-ip"]}},
+                global_config={},
+            )
+
+
 class DefaultPathTests(unittest.TestCase):
     def test_defaults_use_vm_directory_layout(self):
         with tempfile.TemporaryDirectory() as tmpdir:

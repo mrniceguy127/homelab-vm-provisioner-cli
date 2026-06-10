@@ -2,6 +2,13 @@
 
 hostname: {{ vm_name }}
 manage_etc_hosts: true
+manage_resolv_conf: true
+
+resolv_conf:
+  nameservers:
+{% for resolver in dns_resolvers %}
+    - {{ resolver }}
+{% endfor %}
 
 users:
   - name: {{ admin_user }}
@@ -20,18 +27,6 @@ users:
       - {{ vm_public_key }}
 {% endif %}
 
-package_update: true
-package_upgrade: true
-
-packages:
-  - firewalld
-  - curl
-  - wget
-  - nano
-{% for package in packages %}
-  - {{ package }}
-{% endfor %}
-
 write_files:
   - path: /etc/ssh/sshd_config.d/99-hardening.conf
     content: |
@@ -40,7 +35,43 @@ write_files:
       PubkeyAuthentication yes
       AllowUsers {{ admin_user }} {{ vm_user }}
 
+  - path: /usr/local/share/vm-resolv.conf
+    content: |
+{% for resolver in dns_resolvers %}
+      nameserver {{ resolver }}
+{% endfor %}
+
+  - path: /usr/local/sbin/vm-package-setup
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+
+      cp /usr/local/share/vm-resolv.conf /etc/resolv.conf
+
+      packages="firewalld curl wget nano{% for package in packages %} {{ package }}{% endfor %}"
+
+      if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get -y upgrade
+        apt-get install -y $packages
+      elif command -v dnf >/dev/null 2>&1; then
+        dnf -y upgrade
+        dnf -y install $packages
+      elif command -v yum >/dev/null 2>&1; then
+        yum -y update
+        yum -y install $packages
+      elif command -v pacman >/dev/null 2>&1; then
+        pacman -Syu --noconfirm
+        pacman -S --noconfirm --needed $packages
+      else
+        echo "Unsupported guest package manager" >&2
+        exit 1
+      fi
+
 runcmd:
+  - /usr/local/sbin/vm-package-setup
   - systemctl enable --now firewalld
   - firewall-cmd --permanent --add-service=ssh
   - firewall-cmd --reload

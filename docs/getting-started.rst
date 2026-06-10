@@ -35,6 +35,7 @@ By default:
 - persisted state is tracked in ``vm/state/<vm>.yaml``
 - user public keys are resolved from ``vm/keys/users/``
 - generated admin keys are written under ``vm/keys/admin/``
+- guest ``/etc/resolv.conf`` defaults to ``1.1.1.1`` and ``1.0.0.1``
 - the guest image defaults to the Debian 12 cloud image with libvirt
   ``os_variant`` set to ``generic``
 
@@ -44,6 +45,9 @@ created and an administrator can add the key later.
 
 Global image defaults live in ``vmctl.yaml`` under ``image:``, and a VM config
 can override them with its own ``image:`` block.
+
+Guest DNS defaults live in ``vmctl.yaml`` under ``dns:``, and a VM config can
+override them with its own ``dns:`` block.
 
 Use ``virt-install --osinfo list`` on the host if you want to override
 ``image.os_variant`` with a distro-specific value.

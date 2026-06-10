@@ -328,6 +328,7 @@ class CreateTests(unittest.TestCase):
                 "url": "https://example.invalid/images/ubuntu-24.04.img",
                 "os_variant": "ubuntu24.04",
             }
+            dns_settings = {"resolvers": ("1.1.1.1", "1.0.0.1")}
 
             with patch.object(cli, "require_tools"), patch.object(
                 cli, "load_global_config", return_value=global_config
@@ -346,6 +347,8 @@ class CreateTests(unittest.TestCase):
             ), patch.object(
                 cli, "image_settings_for_config", return_value=image_settings
             ) as image_settings_mock, patch.object(
+                cli, "dns_settings_for_config", return_value=dns_settings
+            ) as dns_settings_mock, patch.object(
                 cli, "validate_os_variant"
             ) as validate_os_variant_mock, patch.object(
                 cli, "ensure_base_image", return_value=Path("/images/ubuntu-24.04.img")
@@ -409,6 +412,28 @@ class CreateTests(unittest.TestCase):
             },
             global_config=global_config,
         )
+        dns_settings_mock.assert_called_once_with(
+            {
+                "vm": {
+                    "name": "demo",
+                    "user": "tenant",
+                    "ssh_key_file": tenant_key.as_posix(),
+                    "ram_mb": 4096,
+                    "vcpus": 2,
+                    "disk_gb": 40,
+                    "allow_sudo": False,
+                    "trust": "untrusted",
+                    "template": "base",
+                },
+                "network": {
+                    "mode": "nat-custom",
+                    "subnet_prefix": "192.168.240",
+                },
+                "packages": ["htop"],
+                "ports": [{"host": 2222, "guest": 22}],
+            },
+            global_config=global_config,
+        )
         validate_os_variant_mock.assert_called_once_with("ubuntu24.04")
         create_nat_network_mock.assert_called_once_with("demo", expected_network)
 
@@ -425,6 +450,7 @@ class CreateTests(unittest.TestCase):
                 "vm_public_key": "ssh-ed25519 AAA tenant",
                 "vm_sudo": "false",
                 "packages": ["htop"],
+                "dns_resolvers": ("1.1.1.1", "1.0.0.1"),
             },
         )
 
@@ -607,6 +633,7 @@ class CreateTests(unittest.TestCase):
                 "url": "https://example.invalid/images/ubuntu-24.04.img",
                 "os_variant": "ubuntu24.04",
             }
+            dns_settings = {"resolvers": ("9.9.9.9", "149.112.112.112")}
 
             with patch.object(cli, "require_tools"), patch.object(
                 cli, "load_global_config", return_value={}
@@ -624,6 +651,8 @@ class CreateTests(unittest.TestCase):
                 cli, "run"
             ), patch.object(
                 cli, "image_settings_for_config", return_value=image_settings
+            ), patch.object(
+                cli, "dns_settings_for_config", return_value=dns_settings
             ), patch.object(
                 cli, "validate_os_variant"
             ), patch.object(
@@ -650,6 +679,7 @@ class CreateTests(unittest.TestCase):
         resolve_user_key_path_mock.assert_not_called()
         render_context, _, _ = render_templates_mock.call_args.args
         self.assertIsNone(render_context["vm_public_key"])
+        self.assertEqual(render_context["dns_resolvers"], ("9.9.9.9", "149.112.112.112"))
         first_state = save_state_mock.call_args_list[0].args[1]
         self.assertEqual(first_state["admin_private_key"], str(admin_key))
 
@@ -685,6 +715,7 @@ class CreateTests(unittest.TestCase):
                 "url": "https://example.invalid/images/ubuntu-24.04.img",
                 "os_variant": "ubuntu24.04",
             }
+            dns_settings = {"resolvers": ("1.1.1.1", "1.0.0.1")}
 
             with patch.object(cli, "require_tools"), patch.object(
                 cli, "load_global_config", return_value={}
@@ -700,6 +731,8 @@ class CreateTests(unittest.TestCase):
                 cli, "run"
             ), patch.object(
                 cli, "image_settings_for_config", return_value=image_settings
+            ), patch.object(
+                cli, "dns_settings_for_config", return_value=dns_settings
             ), patch.object(
                 cli, "validate_os_variant"
             ), patch.object(

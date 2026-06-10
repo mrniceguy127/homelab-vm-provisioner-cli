@@ -68,14 +68,35 @@ class TemplateRenderTests(unittest.TestCase):
                     "vm_public_key": "ssh-ed25519 AAA tenant",
                     "vm_sudo": "false",
                     "packages": ["htop"],
+                    "dns_resolvers": ("1.1.1.1", "1.0.0.1"),
                 },
                 "base",
                 vm_data_dir,
             )
 
+            rendered = user_data.read_text(encoding="utf-8")
             self.assertTrue(user_data.exists())
             self.assertTrue(meta_data.exists())
-            self.assertIn("tenant", user_data.read_text(encoding="utf-8"))
+            self.assertIn("tenant", rendered)
+            self.assertIn("manage_resolv_conf: true", rendered)
+            self.assertIn("- 1.1.1.1", rendered)
+            self.assertIn("- 1.0.0.1", rendered)
+            self.assertIn("path: /usr/local/share/vm-resolv.conf", rendered)
+            self.assertIn("path: /usr/local/sbin/vm-package-setup", rendered)
+            self.assertIn("apt-get install -y $packages", rendered)
+            self.assertIn("dnf -y install $packages", rendered)
+            self.assertIn("pacman -S --noconfirm --needed $packages", rendered)
+            self.assertIn("/usr/local/sbin/vm-package-setup", rendered)
+            self.assertIn("nameserver 1.1.1.1", rendered)
+            self.assertIn("nameserver 1.0.0.1", rendered)
+            self.assertIn("cp /usr/local/share/vm-resolv.conf /etc/resolv.conf", rendered)
+            package_setup_section = rendered.split("/usr/local/sbin/vm-package-setup\n", 1)[1]
+            self.assertLess(
+                package_setup_section.index("cp /usr/local/share/vm-resolv.conf /etc/resolv.conf"),
+                package_setup_section.index("apt-get update"),
+            )
+            self.assertNotIn("package_update:", rendered)
+            self.assertNotIn("package_upgrade:", rendered)
             self.assertIn("instance-id: demo", meta_data.read_text(encoding="utf-8"))
 
     def test_render_templates_skips_tenant_authorized_keys_when_key_is_missing(self):
@@ -91,6 +112,7 @@ class TemplateRenderTests(unittest.TestCase):
                     "vm_public_key": None,
                     "vm_sudo": "false",
                     "packages": [],
+                    "dns_resolvers": ("1.1.1.1", "1.0.0.1"),
                 },
                 "base",
                 vm_data_dir,
@@ -100,6 +122,12 @@ class TemplateRenderTests(unittest.TestCase):
 
         self.assertIn("- name: tenant", rendered)
         self.assertEqual(rendered.count("ssh_authorized_keys:"), 1)
+        self.assertIn("- 1.1.1.1", rendered)
+        self.assertIn("- 1.0.0.1", rendered)
+        self.assertIn("nameserver 1.1.1.1", rendered)
+        self.assertIn("nameserver 1.0.0.1", rendered)
+        self.assertIn("cp /usr/local/share/vm-resolv.conf /etc/resolv.conf", rendered)
+        self.assertIn("/usr/local/sbin/vm-package-setup", rendered)
 
 
 class ImageAndDiskTests(unittest.TestCase):
@@ -322,6 +350,8 @@ class LibvirtProvisionTests(unittest.TestCase):
                 )
 
             self.assertTrue(fake_xml_path.exists())
+            xml_text = fake_xml_path.read_text(encoding="utf-8")
+            self.assertNotIn("<dns>", xml_text)
             self.assertEqual(
                 run_mock.call_args_list,
                 [

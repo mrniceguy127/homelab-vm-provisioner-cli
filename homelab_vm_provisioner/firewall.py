@@ -20,6 +20,32 @@ def forward_port_spec(port, vm_ip):
     )
 
 
+def direct_forward_rule_args(port, vm_ip):
+    """Build a firewalld direct FORWARD accept rule.
+
+    Args:
+        port: Port mapping dictionary.
+        vm_ip: Destination VM IP address.
+
+    Returns:
+        list[str]: Rule arguments accepted by ``firewall-cmd --direct``.
+    """
+    return [
+        "ipv4",
+        "filter",
+        "FORWARD",
+        "0",
+        "-p",
+        port.get("proto", "tcp"),
+        "-d",
+        vm_ip,
+        "--dport",
+        str(port["guest"]),
+        "-j",
+        "ACCEPT",
+    ]
+
+
 def apply_firewalld_nat_policy(network, trust, ports):
     """Apply host firewalld policy for a NAT-backed VM.
 
@@ -40,6 +66,7 @@ def apply_firewalld_nat_policy(network, trust, ports):
     if zone_created:
         run(["firewall-cmd", "--permanent", "--new-zone", zone], sudo=True)
 
+    run(["firewall-cmd", "--permanent", "--zone", zone, "--set-target", "ACCEPT"], sudo=True)
     run(["firewall-cmd", "--permanent", "--zone", zone, "--add-source", cidr], sudo=True)
 
     if trust == "untrusted":
@@ -63,6 +90,16 @@ def apply_firewalld_nat_policy(network, trust, ports):
                 "firewall-cmd",
                 "--permanent",
                 f"--add-forward-port={forward_port_spec(port, vm_ip)}",
+            ],
+            sudo=True,
+        )
+        run(
+            [
+                "firewall-cmd",
+                "--permanent",
+                "--direct",
+                "--add-rule",
+                *direct_forward_rule_args(port, vm_ip),
             ],
             sudo=True,
         )
@@ -176,6 +213,60 @@ def remove_forward_port_rule(spec, zone=None):
     run(cmd, sudo=True, check=False)
 
 
+def list_direct_rules():
+    """List permanent firewalld direct rules.
+
+    Returns:
+        list[list[str]]: Direct rules split into argument lists.
+    """
+    output = capture_or_none(
+        ["firewall-cmd", "--permanent", "--direct", "--get-all-rules"],
+        sudo=True,
+    )
+    if not output:
+        return []
+
+    return [line.split() for line in output.splitlines() if line.strip()]
+
+
+def find_direct_forward_rules_for_vm(vm_ip):
+    """Find direct FORWARD accept rules that target a VM IP.
+
+    Args:
+        vm_ip: VM IP address.
+
+    Returns:
+        list[list[str]]: Matching direct rule argument lists.
+    """
+    rules = []
+    for rule in list_direct_rules():
+        if len(rule) < 4:
+            continue
+        if rule[:4] != ["ipv4", "filter", "FORWARD", "0"]:
+            continue
+        if "-d" not in rule:
+            continue
+        dest_index = rule.index("-d") + 1
+        if dest_index >= len(rule) or rule[dest_index] != vm_ip:
+            continue
+        rules.append(rule)
+
+    return rules
+
+
+def remove_direct_rule(rule_args):
+    """Remove a permanent firewalld direct rule.
+
+    Args:
+        rule_args: Direct rule argument list.
+    """
+    run(
+        ["firewall-cmd", "--permanent", "--direct", "--remove-rule", *rule_args],
+        sudo=True,
+        check=False,
+    )
+
+
 def firewalld_zone_is_empty(zone):
     """Return whether a firewalld zone has no remaining configured rules.
 
@@ -226,6 +317,16 @@ def cleanup_firewalld_vm_policy(vm_name, network, ports):
         zone = preferred_zone
     elif cidr:
         zone = firewalld_zone_for_cidr(cidr, preferred_zone=preferred_zone)
+
+    direct_rules = find_direct_forward_rules_for_vm(vm_ip) if vm_ip else []
+    for rule in direct_rules:
+        remove_direct_rule(rule)
+        cleanup_attempted = True
+
+    if not direct_rules and vm_ip:
+        for port in ports:
+            remove_direct_rule(direct_forward_rule_args(port, vm_ip))
+            cleanup_attempted = True
 
     rules = find_forward_port_rules_for_vm(vm_ip) if vm_ip else []
     for rule_zone, spec in rules:

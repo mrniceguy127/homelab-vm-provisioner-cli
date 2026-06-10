@@ -14,6 +14,28 @@ class ForwardPortSpecTests(unittest.TestCase):
             "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22",
         )
 
+    def test_builds_direct_forward_rule_args(self):
+        self.assertEqual(
+            firewall.direct_forward_rule_args(
+                {"host": 2222, "guest": 22, "proto": "tcp"},
+                "192.168.240.50",
+            ),
+            [
+                "ipv4",
+                "filter",
+                "FORWARD",
+                "0",
+                "-p",
+                "tcp",
+                "-d",
+                "192.168.240.50",
+                "--dport",
+                "22",
+                "-j",
+                "ACCEPT",
+            ],
+        )
+
 
 class ZoneLookupTests(unittest.TestCase):
     def test_firewalld_zone_exists_checks_permanent_zones(self):
@@ -64,6 +86,105 @@ class ZoneLookupTests(unittest.TestCase):
     def test_list_zone_forward_ports_returns_empty_when_unset(self):
         with patch.object(firewall, "capture_or_none", return_value=None):
             self.assertEqual(firewall.list_zone_forward_ports(), [])
+
+    def test_list_direct_rules_splits_output_lines(self):
+        with patch.object(
+            firewall,
+            "capture_or_none",
+            return_value=(
+                "ipv4 filter FORWARD 0 -p tcp -d 192.168.240.50 --dport 22 -j ACCEPT\n"
+                "ipv4 filter FORWARD 0 -p udp -d 192.168.240.50 --dport 25565 -j ACCEPT"
+            ),
+        ):
+            self.assertEqual(
+                firewall.list_direct_rules(),
+                [
+                    [
+                        "ipv4",
+                        "filter",
+                        "FORWARD",
+                        "0",
+                        "-p",
+                        "tcp",
+                        "-d",
+                        "192.168.240.50",
+                        "--dport",
+                        "22",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                    [
+                        "ipv4",
+                        "filter",
+                        "FORWARD",
+                        "0",
+                        "-p",
+                        "udp",
+                        "-d",
+                        "192.168.240.50",
+                        "--dport",
+                        "25565",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                ],
+            )
+
+    def test_find_direct_forward_rules_for_vm_filters_by_destination(self):
+        with patch.object(
+            firewall,
+            "list_direct_rules",
+            return_value=[
+                [
+                    "ipv4",
+                    "filter",
+                    "FORWARD",
+                    "0",
+                    "-p",
+                    "tcp",
+                    "-d",
+                    "192.168.240.50",
+                    "--dport",
+                    "22",
+                    "-j",
+                    "ACCEPT",
+                ],
+                ["ipv4", "filter", "INPUT", "0", "-j", "ACCEPT"],
+                [
+                    "ipv4",
+                    "filter",
+                    "FORWARD",
+                    "0",
+                    "-p",
+                    "tcp",
+                    "-d",
+                    "192.168.240.51",
+                    "--dport",
+                    "80",
+                    "-j",
+                    "ACCEPT",
+                ],
+            ],
+        ):
+            self.assertEqual(
+                firewall.find_direct_forward_rules_for_vm("192.168.240.50"),
+                [
+                    [
+                        "ipv4",
+                        "filter",
+                        "FORWARD",
+                        "0",
+                        "-p",
+                        "tcp",
+                        "-d",
+                        "192.168.240.50",
+                        "--dport",
+                        "22",
+                        "-j",
+                        "ACCEPT",
+                    ]
+                ],
+            )
 
     def test_find_forward_port_rules_for_vm_filters_by_ip(self):
         with patch.object(
@@ -139,6 +260,37 @@ class ApplyFirewalldNatPolicyTests(unittest.TestCase):
             run_mock.call_args_list[0],
             call(["firewall-cmd", "--permanent", "--new-zone", "demo-zone"], sudo=True),
         )
+        self.assertEqual(
+            run_mock.call_args_list[1],
+            call(
+                ["firewall-cmd", "--permanent", "--zone", "demo-zone", "--set-target", "ACCEPT"],
+                sudo=True,
+            ),
+        )
+        self.assertIn(
+            call(
+                [
+                    "firewall-cmd",
+                    "--permanent",
+                    "--direct",
+                    "--add-rule",
+                    "ipv4",
+                    "filter",
+                    "FORWARD",
+                    "0",
+                    "-p",
+                    "tcp",
+                    "-d",
+                    "192.168.240.50",
+                    "--dport",
+                    "22",
+                    "-j",
+                    "ACCEPT",
+                ],
+                sudo=True,
+            ),
+            run_mock.call_args_list,
+        )
         self.assertEqual(run_mock.call_args_list[-1], call(["firewall-cmd", "--reload"], sudo=True))
 
     def test_trusted_vm_uses_existing_zone_without_rich_rules(self):
@@ -159,6 +311,17 @@ class ApplyFirewalldNatPolicyTests(unittest.TestCase):
         self.assertEqual(
             run_mock.call_args_list,
             [
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--zone",
+                        "demo-zone",
+                        "--set-target",
+                        "ACCEPT",
+                    ],
+                    sudo=True,
+                ),
                 call(
                     [
                         "firewall-cmd",
@@ -195,11 +358,72 @@ class RemoveForwardPortRuleTests(unittest.TestCase):
             check=False,
         )
 
+    def test_remove_direct_rule_uses_direct_remove(self):
+        with patch.object(firewall, "run") as run_mock:
+            firewall.remove_direct_rule(
+                [
+                    "ipv4",
+                    "filter",
+                    "FORWARD",
+                    "0",
+                    "-p",
+                    "tcp",
+                    "-d",
+                    "192.168.240.50",
+                    "--dport",
+                    "22",
+                    "-j",
+                    "ACCEPT",
+                ]
+            )
+
+        run_mock.assert_called_once_with(
+            [
+                "firewall-cmd",
+                "--permanent",
+                "--direct",
+                "--remove-rule",
+                "ipv4",
+                "filter",
+                "FORWARD",
+                "0",
+                "-p",
+                "tcp",
+                "-d",
+                "192.168.240.50",
+                "--dport",
+                "22",
+                "-j",
+                "ACCEPT",
+            ],
+            sudo=True,
+            check=False,
+        )
+
 
 class CleanupFirewalldVmPolicyTests(unittest.TestCase):
     def test_removes_vm_specific_policy(self):
         with patch.object(firewall, "tool_exists", return_value=True), patch.object(
             firewall, "firewalld_zone_exists", return_value=True
+        ), patch.object(
+            firewall,
+            "find_direct_forward_rules_for_vm",
+            return_value=[
+                [
+                    "ipv4",
+                    "filter",
+                    "FORWARD",
+                    "0",
+                    "-p",
+                    "tcp",
+                    "-d",
+                    "192.168.240.50",
+                    "--dport",
+                    "22",
+                    "-j",
+                    "ACCEPT",
+                ]
+            ],
         ), patch.object(
             firewall,
             "find_forward_port_rules_for_vm",
@@ -220,6 +444,28 @@ class CleanupFirewalldVmPolicyTests(unittest.TestCase):
         self.assertEqual(
             run_mock.call_args_list,
             [
+                call(
+                    [
+                        "firewall-cmd",
+                        "--permanent",
+                        "--direct",
+                        "--remove-rule",
+                        "ipv4",
+                        "filter",
+                        "FORWARD",
+                        "0",
+                        "-p",
+                        "tcp",
+                        "-d",
+                        "192.168.240.50",
+                        "--dport",
+                        "22",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                    sudo=True,
+                    check=False,
+                ),
                 call(
                     [
                         "firewall-cmd",
@@ -324,10 +570,14 @@ class CleanupFirewalldVmPolicyTests(unittest.TestCase):
         ), patch.object(
             firewall, "firewalld_zone_for_cidr", return_value="demo-zone"
         ), patch.object(
+            firewall, "find_direct_forward_rules_for_vm", return_value=[]
+        ), patch.object(
             firewall, "find_forward_port_rules_for_vm", return_value=[]
         ), patch.object(
             firewall, "remove_forward_port_rule"
         ) as remove_rule_mock, patch.object(
+            firewall, "remove_direct_rule"
+        ) as remove_direct_rule_mock, patch.object(
             firewall, "firewalld_zone_is_empty", return_value=False
         ), patch.object(firewall, "run") as run_mock:
             firewall.cleanup_firewalld_vm_policy(
@@ -340,6 +590,22 @@ class CleanupFirewalldVmPolicyTests(unittest.TestCase):
                 [{"host": 2222, "guest": 22, "proto": "tcp"}],
             )
 
+        remove_direct_rule_mock.assert_called_once_with(
+            [
+                "ipv4",
+                "filter",
+                "FORWARD",
+                "0",
+                "-p",
+                "tcp",
+                "-d",
+                "192.168.240.50",
+                "--dport",
+                "22",
+                "-j",
+                "ACCEPT",
+            ]
+        )
         remove_rule_mock.assert_called_once_with(
             "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22"
         )

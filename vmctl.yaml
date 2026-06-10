@@ -8,3 +8,8 @@ image:
   name: debian-12-generic-amd64.qcow2
   url: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
   os_variant: generic
+
+dns:
+  resolvers:
+    - 1.1.1.1
+    - 1.0.0.1
