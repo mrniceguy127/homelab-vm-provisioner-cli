@@ -34,7 +34,7 @@ def direct_forward_rule_args(port, vm_ip):
         "ipv4",
         "filter",
         "FORWARD",
-        "0",
+        "-1000",
         "-p",
         port.get("proto", "tcp"),
         "-d",
