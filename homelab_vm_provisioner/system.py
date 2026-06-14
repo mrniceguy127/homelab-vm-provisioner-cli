@@ -4,6 +4,7 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,30 @@ from pathlib import Path
 from .constants import DEFAULT_REQUIRED_TOOLS, INSTALL_HINT
 
 LOCK_ROOT = Path(tempfile.gettempdir()) / "homelab-vm-provisioner" / "locks"
+STANDARD_PATH_ENTRIES = (
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+)
+
+
+def normalized_command_path(current_path=None):
+    """Return PATH text with standard system command directories included."""
+
+    path_value = current_path if current_path is not None else os.environ.get("PATH", "")
+    entries = [entry for entry in str(path_value).split(os.pathsep) if entry]
+    seen = set(entries)
+    for entry in STANDARD_PATH_ENTRIES:
+        if entry not in seen:
+            entries.append(entry)
+            seen.add(entry)
+    return os.pathsep.join(entries)
+
+
+os.environ["PATH"] = normalized_command_path()
 
 
 class VmLifecycleLockError(RuntimeError):
@@ -69,12 +94,7 @@ def tool_exists(tool):
     Returns:
         bool: ``True`` when the executable can be found.
     """
-    result = subprocess.run(
-        ["which", tool],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return result.returncode == 0
+    return shutil.which(tool, path=normalized_command_path()) is not None
 
 
 def run(cmd, sudo=False, check=True):

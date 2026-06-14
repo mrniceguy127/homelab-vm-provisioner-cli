@@ -292,7 +292,14 @@ def create_nat_network(vm_name, network):
 """.strip()
 
     xml_path = Path("/tmp") / f"{network['name']}.xml"
-    xml_path.write_text(xml, encoding="utf-8")
+    #xml_path.write_text(xml, encoding="utf-8")
+    subprocess.run(
+        ["sudo", "tee", str(xml_path)],
+        input=xml,
+        text=True,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
 
     result = subprocess.run(
         ["sudo", "virsh", "net-info", network["name"]],

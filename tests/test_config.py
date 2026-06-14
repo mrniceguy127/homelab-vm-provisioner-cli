@@ -464,3 +464,27 @@ class StateFileTests(unittest.TestCase):
             loaded["admin_private_key"],
             "/vm/keys/provider/demo_provider_ed25519",
         )
+
+    def test_load_vm_state_rewrites_stale_config_path_to_current_saved_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            state_root = repo_root / "vm" / "state"
+            config_root = repo_root / "configs"
+            state_root.mkdir(parents=True)
+            config_root.mkdir(parents=True)
+
+            current_config_path = config_root / "demo.yaml"
+            current_config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
+
+            stale_config_path = repo_root / "runtime" / "configs" / "demo.yaml"
+            (state_root / "demo.yaml").write_text(
+                f"config_path: {stale_config_path}\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(config, "PROJECT_DIR", repo_root), patch.object(
+                config, "LEGACY_VM_BUILD_DIR", repo_root / ".build"
+            ), patch.object(config, "load_global_config", return_value={}):
+                loaded = config.load_vm_state("demo")
+
+        self.assertEqual(loaded["config_path"], str(current_config_path))

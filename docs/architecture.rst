@@ -13,11 +13,13 @@ The Python package is split by responsibility:
 +--------------------------------+---------------------------------------------+
 | ``config``                     | Config loading and saved VM state           |
 +--------------------------------+---------------------------------------------+
+| ``managed_nftables``           | Managed nftables table rendering and apply  |
++--------------------------------+---------------------------------------------+
 | ``network``                    | Network selection and libvirt discovery     |
 +--------------------------------+---------------------------------------------+
 | ``provision``                  | Template rendering and libvirt provisioning |
 +--------------------------------+---------------------------------------------+
-| ``firewall``                   | Firewalld rule management                   |
+| ``reconciler``                 | Libvirt network and nftables reconciliation |
 +--------------------------------+---------------------------------------------+
 | ``system``                     | Shared subprocess helpers                   |
 +--------------------------------+---------------------------------------------+
@@ -45,6 +47,6 @@ Configuration
 - ``paths.vm_data_dir`` lets each VM config override its local artifact directory.
 - ``image`` settings in a VM config override the global guest image settings.
 - The default ``image.os_variant`` is ``generic`` to avoid host-specific libosinfo failures.
-- NAT port forwarding installs firewalld direct ``FORWARD`` accept rules at priority ``-1000`` as a host-compatibility workaround.
-- On hosts where libvirt's nft-managed ``LIBVIRT_FWI`` chain still rejects guest traffic, the firewall layer discovers the real nft table that owns ``LIBVIRT_FWI`` and inserts the guest allow rule before the bridge-specific ``reject`` rule by handle instead of assuming a fixed chain position.
+- VM networking policy is rendered into application-owned ``hvp_filter``, ``hvp_nat``, and ``hvp_bridge_filter`` nftables tables.
+- Same-bridge VM-to-VM traffic is filtered in the bridge family so same-subnet isolation works even when guests share one Linux bridge.
 - Relative ``paths.vm_data_dir`` values resolve from the project root.

@@ -377,6 +377,11 @@ def resolve_setup_script_path(path, global_config=None):
     return resolve_project_path(raw_path)
 
 
+def default_config_file_for_vm(vm_name):
+    """Return the default saved config path for a VM name."""
+    return PROJECT_DIR / "configs" / f"{vm_name}.yaml"
+
+
 def state_file_for_vm(vm_name, global_config=None):
     """Return the persisted state file path for a VM.
 
@@ -449,5 +454,14 @@ def load_vm_state(vm_name):
 
     if state_path == legacy_state_file_for_vm(vm_name):
         state.setdefault("vm_data_dir", str(legacy_vm_data_dir(vm_name)))
+
+    config_path = state.get("config_path")
+    current_config_path = default_config_file_for_vm(vm_name)
+    if (
+        config_path
+        and not Path(config_path).expanduser().exists()
+        and current_config_path.exists()
+    ):
+        state["config_path"] = str(current_config_path)
 
     return state

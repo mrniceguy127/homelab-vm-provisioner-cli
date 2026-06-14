@@ -56,7 +56,7 @@ install_system_packages() {
                 virtinst \
                 qemu-utils \
                 cloud-image-utils \
-                firewalld \
+                nftables \
                 wget \
                 openssh-client \
                 python3 \
@@ -70,7 +70,7 @@ install_system_packages() {
                 virt-install \
                 qemu-img \
                 cloud-utils \
-                firewalld \
+                nftables \
                 wget \
                 openssh-clients \
                 python3 \
@@ -84,7 +84,7 @@ install_system_packages() {
                 virt-install \
                 qemu-img \
                 cloud-utils \
-                firewalld \
+                nftables \
                 wget \
                 openssh-clients \
                 python3 \
@@ -96,7 +96,7 @@ install_system_packages() {
                 libvirt \
                 virt-install \
                 cloud-image-utils \
-                firewalld \
+                nftables \
                 wget \
                 openssh \
                 python \
@@ -110,7 +110,6 @@ install_system_packages() {
 
     if command -v systemctl >/dev/null 2>&1; then
         run_sudo systemctl enable --now libvirtd
-        run_sudo systemctl enable --now firewalld
     fi
 }
 

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from helpers import completed_process
 
-from homelab_vm_provisioner import cli, config, firewall, network, provision
+from homelab_vm_provisioner import cli, config, managed_nftables, network, provision, reconciler
 
 
 class FakeHost:
@@ -16,17 +16,10 @@ class FakeHost:
         self.vm_ips = {}
         self.vm_bridges = {}
         self.network_xml = {}
-        self.zones = {"public"}
-        self.zone_sources = {}
-        self.zone_rich_rules = {}
-        self.forward_ports = {None: set()}
-        self.firewalld_direct_rules = []
-        self.nft_rules = []
-        self.next_nft_handle = 1
-        self.nft_reject_handles = {}
+        self.applied_nft_rulesets = []
+        self.current_nft_ruleset = ""
         self.cli_commands = []
         self.provision_commands = []
-        self.firewall_commands = []
         self.ssh_commands = []
         self.network_dumpxml_requests = []
         self.domifaddr_requests = []
@@ -54,7 +47,6 @@ class FakeHost:
         self.network_xml[network_config["name"]] = xml_text
         self.vm_ips[vm_name] = network_config["vm_ip"]
         self.vm_bridges[network_config["vm_ip"]] = bridge_name
-        self.nft_reject_handles.setdefault(bridge_name, str(18 + len(self.nft_reject_handles)))
 
     def cli_run(self, cmd, sudo=False, check=True):
         self.cli_commands.append((list(cmd), sudo, check))
@@ -137,100 +129,22 @@ class FakeHost:
 
         return completed_process()
 
-    def firewall_capture(self, cmd, sudo=False):
-        return self.firewall_capture_or_none(cmd, sudo=sudo) or ""
+    def apply_nftables_ruleset(self, plan):
+        previous_tables = {
+            "filter": self.current_nft_ruleset or None,
+            "nat": self.current_nft_ruleset or None,
+        }
+        ruleset_text = managed_nftables.render_ruleset(plan, previous_tables=previous_tables)
+        self.current_nft_ruleset = ruleset_text
+        self.applied_nft_rulesets.append(ruleset_text)
+        return {"previous_tables": {"filter": bool(previous_tables["filter"]), "nat": bool(previous_tables["nat"])} , "ruleset_text": ruleset_text}
 
-    def firewall_capture_or_none(self, cmd, sudo=False):
-        zone = self._zone_from_cmd(cmd)
-
-        if len(cmd) >= 4 and cmd[:3] == ["ip", "route", "get"]:
-            bridge_name = self.vm_bridges.get(cmd[3])
-            if bridge_name is None:
-                return None
-            return f"{cmd[3]} dev {bridge_name} src 192.168.240.1"
-        if cmd[:3] == ["nft", "list", "ruleset"]:
-            lines = ["table ip filter {", "    chain LIBVIRT_FWI {"]
-            lines.extend(["    }", "}"])
-            return "\n".join(lines)
-        if cmd[:4] == ["nft", "-a", "list", "chain"]:
-            lines = ["table ip filter {", "    chain LIBVIRT_FWI {"]
-            for handle, rule in self.nft_rules:
-                lines.append(f"        {' '.join(rule)} # handle {handle}")
-            for bridge_name, handle in self.nft_reject_handles.items():
-                lines.append(f'        oifname "{bridge_name}" reject # handle {handle}')
-            lines.extend(["    }", "}"])
-            return "\n".join(lines)
-        if cmd[:4] == ["firewall-cmd", "--permanent", "--direct", "--get-all-rules"]:
-            return "\n".join(" ".join(rule) for rule in self.firewalld_direct_rules)
-
-        if cmd[-1] == "--get-zones":
-            return " ".join(sorted(self.zones))
-        if cmd[-1] == "--list-sources":
-            return " ".join(sorted(self.zone_sources.get(zone, set())))
-        if cmd[-1] == "--list-forward-ports":
-            return " ".join(sorted(self.forward_ports.get(zone, set())))
-        if cmd[-1] == "--list-rich-rules":
-            return "\n".join(sorted(self.zone_rich_rules.get(zone, set())))
-        if cmd[-1].startswith("--list-"):
-            return ""
-
-        return None
-
-    def firewall_run(self, cmd, sudo=False, check=True):
-        self.firewall_commands.append((list(cmd), sudo, check))
-        if cmd[0] == "nft":
-            if cmd[1:3] == ["insert", "rule"]:
-                rule_start = cmd.index("handle") + 2
-                self.nft_rules.append((self.next_nft_handle, cmd[rule_start:]))
-                self.next_nft_handle += 1
-            elif cmd[1:3] == ["delete", "rule"]:
-                handle = int(cmd[-1])
-                self.nft_rules = [
-                    existing for existing in self.nft_rules if existing[0] != handle
-                ]
-            return completed_process()
-
-        zone = self._zone_from_cmd(cmd)
-
-        if "--new-zone" in cmd:
-            zone = cmd[cmd.index("--new-zone") + 1]
-            self.zones.add(zone)
-            self.zone_sources.setdefault(zone, set())
-            self.zone_rich_rules.setdefault(zone, set())
-            self.forward_ports.setdefault(zone, set())
-        elif "--delete-zone" in cmd:
-            zone = cmd[cmd.index("--delete-zone") + 1]
-            self.zones.discard(zone)
-            self.zone_sources.pop(zone, None)
-            self.zone_rich_rules.pop(zone, None)
-            self.forward_ports.pop(zone, None)
-        elif "--add-source" in cmd:
-            source = cmd[cmd.index("--add-source") + 1]
-            self.zone_sources.setdefault(zone, set()).add(source)
-        elif "--remove-source" in cmd:
-            source = cmd[cmd.index("--remove-source") + 1]
-            self.zone_sources.setdefault(zone, set()).discard(source)
-        elif "--add-rich-rule" in cmd:
-            rule = cmd[cmd.index("--add-rich-rule") + 1]
-            self.zone_rich_rules.setdefault(zone, set()).add(rule)
-        elif "--remove-rich-rule" in cmd:
-            rule = cmd[cmd.index("--remove-rich-rule") + 1]
-            self.zone_rich_rules.setdefault(zone, set()).discard(rule)
-        elif "--direct" in cmd and "--add-rule" in cmd:
-            self.firewalld_direct_rules.append(cmd[cmd.index("--add-rule") + 1 :])
-        elif "--direct" in cmd and "--remove-rule" in cmd:
-            rule = cmd[cmd.index("--remove-rule") + 1 :]
-            self.firewalld_direct_rules = [
-                existing for existing in self.firewalld_direct_rules if existing != rule
-            ]
-        else:
-            for part in cmd:
-                if part.startswith("--add-forward-port="):
-                    self.forward_ports.setdefault(zone, set()).add(part.split("=", 1)[1])
-                elif part.startswith("--remove-forward-port="):
-                    self.forward_ports.setdefault(zone, set()).discard(part.split("=", 1)[1])
-
-        return completed_process()
+    @staticmethod
+    def verify_nftables_tables():
+        return {
+            "filter": {"family": "inet", "name": "hvp_filter"},
+            "nat": {"family": "ip", "name": "hvp_nat"},
+        }
 
     def network_capture_or_none(self, cmd, sudo=False):
         if cmd[:2] == ["virsh", "net-dumpxml"]:
@@ -239,13 +153,6 @@ class FakeHost:
             return self.network_xml.get(net_name)
 
         return None
-
-    @staticmethod
-    def _zone_from_cmd(cmd):
-        if "--zone" not in cmd:
-            return None
-        return cmd[cmd.index("--zone") + 1]
-
 
 class IntegrationTests(unittest.TestCase):
     def write_global_config(self, root_dir, path_overrides=None, image_overrides=None):
@@ -354,12 +261,12 @@ class IntegrationTests(unittest.TestCase):
         stack.enter_context(patch.object(provision, "IMG_DIR", img_dir))
         stack.enter_context(patch.object(provision, "run", side_effect=host.provision_run))
         stack.enter_context(patch("subprocess.run", side_effect=host.subprocess_run))
-        stack.enter_context(patch.object(firewall, "capture", side_effect=host.firewall_capture))
         stack.enter_context(
-            patch.object(firewall, "capture_or_none", side_effect=host.firewall_capture_or_none)
+            patch.object(reconciler, "apply_managed_nftables_ruleset", side_effect=host.apply_nftables_ruleset)
         )
-        stack.enter_context(patch.object(firewall, "run", side_effect=host.firewall_run))
-        stack.enter_context(patch.object(firewall, "tool_exists", return_value=True))
+        stack.enter_context(
+            patch.object(reconciler, "verify_managed_nftables_tables", side_effect=host.verify_nftables_tables)
+        )
         stack.enter_context(
             patch.object(network, "capture_or_none", side_effect=host.network_capture_or_none)
         )
@@ -403,7 +310,6 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(state["vm_data_dir"], str(vm_data_dir))
             self.assertEqual(state["network"]["name"], "demo-net")
             self.assertEqual(state["network"]["vm_ip"], "192.168.240.50")
-            self.assertEqual(state["firewalld"], {"zone_created": True})
             self.assertEqual(state["admin_private_key"], str(admin_private_key))
             self.assertTrue(admin_private_key.exists())
             self.assertTrue(Path(str(admin_private_key) + ".pub").exists())
@@ -455,66 +361,9 @@ class IntegrationTests(unittest.TestCase):
                 ),
                 host.provision_commands,
             )
-            self.assertEqual(
-                host.forward_ports[None],
-                {
-                    "port=2222:proto=tcp:toaddr=192.168.240.50:toport=22",
-                    "port=8080:proto=tcp:toaddr=192.168.240.50:toport=80",
-                },
-            )
-            self.assertIn(
-                (
-                    [
-                        "nft",
-                        "insert",
-                        "rule",
-                        "ip",
-                        "filter",
-                        "LIBVIRT_FWI",
-                        "handle",
-                        "18",
-                        "oifname",
-                        "virbr-demo",
-                        "ip",
-                        "daddr",
-                        "192.168.240.50",
-                        "tcp",
-                        "dport",
-                        "22",
-                        "accept",
-                    ],
-                    True,
-                    False,
-                ),
-                host.firewall_commands,
-            )
-            self.assertIn(
-                (
-                    [
-                        "nft",
-                        "insert",
-                        "rule",
-                        "ip",
-                        "filter",
-                        "LIBVIRT_FWI",
-                        "handle",
-                        "18",
-                        "oifname",
-                        "virbr-demo",
-                        "ip",
-                        "daddr",
-                        "192.168.240.50",
-                        "tcp",
-                        "dport",
-                        "80",
-                        "accept",
-                    ],
-                    True,
-                    False,
-                ),
-                host.firewall_commands,
-            )
-            self.assertIn("demo-zone", host.zones)
+            self.assertIn('tcp dport 2222 dnat to 192.168.240.50:22', host.applied_nft_rulesets[-1])
+            self.assertIn('tcp dport 8080 dnat to 192.168.240.50:80', host.applied_nft_rulesets[-1])
+            self.assertIn('ct status dnat ip daddr 192.168.240.50 tcp dport 22 accept', host.applied_nft_rulesets[-1])
             self.assertIn("demo", host.vm_names)
 
             cli.main(["destroy", "demo"])
@@ -526,26 +375,8 @@ class IntegrationTests(unittest.TestCase):
             self.assertFalse(vm_data_dir.exists())
             self.assertFalse((img_dir / "demo.qcow2").exists())
             self.assertFalse((img_dir / "demo-seed.iso").exists())
-            self.assertNotIn("demo-zone", host.zones)
-            self.assertEqual(host.forward_ports[None], set())
             self.assertEqual(host.vm_names, set())
-            self.assertIn(
-                (
-                    [
-                        "nft",
-                        "delete",
-                        "rule",
-                        "ip",
-                        "filter",
-                        "LIBVIRT_FWI",
-                        "handle",
-                        "1",
-                    ],
-                    True,
-                    False,
-                ),
-                host.firewall_commands,
-            )
+            self.assertNotIn('tcp dport 2222 dnat to 192.168.240.50:22', host.applied_nft_rulesets[-1])
             self.assertEqual(self.extract_virsh_actions(host.cli_commands), [
                 ["virsh", "destroy", "demo"],
                 ["virsh", "undefine", "demo", "--remove-all-storage"],

@@ -7,7 +7,8 @@ API Reference
    package
    cli
    config
-   firewall
+   managed_nftables
    network
    provision
+   reconciler
    system

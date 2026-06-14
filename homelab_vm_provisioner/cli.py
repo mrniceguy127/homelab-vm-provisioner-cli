@@ -27,7 +27,6 @@ from .config import (
     vm_data_dir_for_config,
 )
 from .constants import ADMIN_USER
-from .firewall import apply_firewalld_nat_policy, cleanup_firewalld_vm_policy
 from .network import discover_vm_network, pick_free_subnet, random_mac, resolve_vm_ipv4
 from .provision import (
     admin_keypair,
@@ -52,27 +51,30 @@ from .provision import (
     vm_disk_path,
     vm_exists,
 )
+from .reconciler import (
+    configured_vm_records,
+    normalize_network_profile,
+    reconcile_networking,
+    validate_networking_changes,
+)
 from .system import capture_or_none, host_lifecycle_lock, require_tools, run
 
-MAX_VM_NAME_LENGTH = 12
+MAX_VM_NAME_LENGTH = 63
 
 
 def validate_vm_name(vm_name):
-    """Validate the VM name against derived firewalld resource limits.
+    """Validate the VM name against the project VM name limit.
 
     Args:
         vm_name: VM name from config.
 
     Raises:
-        ValueError: If the VM name is too long for the default derived zone name.
+        ValueError: If the VM name is too long.
     """
     if len(vm_name) <= MAX_VM_NAME_LENGTH:
         return
 
-    raise ValueError(
-        "vm.name must be 12 characters or fewer so the default firewalld zone name "
-        f"'{vm_name}-zone' stays within the 17-character limit"
-    )
+    raise ValueError(f"vm.name must be {MAX_VM_NAME_LENGTH} characters or fewer")
 
 
 def _validate_nat_custom_network(network):
@@ -127,6 +129,38 @@ def build_network_config(vm_name, net_cfg):
     Raises:
         ValueError: If ``network.mode`` is invalid or incomplete.
     """
+    if net_cfg.get("network_group_id") or net_cfg.get("subnet_cidr") or net_cfg.get("profile"):
+        profile = normalize_network_profile(net_cfg)
+        network = {
+            "profile": profile,
+            "mode": "bridge" if profile == "bridged" else profile,
+            "network_group_id": net_cfg.get("network_group_id"),
+            "group_name": net_cfg.get("group_name"),
+            "owner_user_id": net_cfg.get("owner_user_id"),
+            "name": net_cfg.get("libvirt_network_name") or net_cfg.get("name"),
+            "libvirt_network_name": net_cfg.get("libvirt_network_name") or net_cfg.get("name"),
+            "bridge_name": net_cfg.get("bridge_name"),
+            "subnet_cidr": net_cfg.get("subnet_cidr") or net_cfg.get("cidr"),
+            "cidr": net_cfg.get("subnet_cidr") or net_cfg.get("cidr"),
+            "gateway_ip": net_cfg.get("gateway_ip") or net_cfg.get("gateway"),
+            "gateway": net_cfg.get("gateway_ip") or net_cfg.get("gateway"),
+            "dhcp_start": net_cfg.get("dhcp_start"),
+            "dhcp_end": net_cfg.get("dhcp_end"),
+            "vm_ip": net_cfg.get("vm_ip"),
+            "mac": net_cfg.get("mac", random_mac()),
+        }
+        if profile == "bridged":
+            network.setdefault("bridge_name", "br0")
+            network.setdefault("vm_ip", "dhcp-from-router")
+            network.setdefault("cidr", "main-lan")
+            return network
+
+        required = ["name", "bridge_name", "cidr", "gateway", "dhcp_start", "dhcp_end", "vm_ip"]
+        missing = [field for field in required if not network.get(field)]
+        if missing:
+            raise ValueError(f"Missing managed network-group fields: {missing}")
+        return network
+
     mode = net_cfg.get("mode", "nat-auto")
     network = {
         "mode": mode,
@@ -136,7 +170,9 @@ def build_network_config(vm_name, net_cfg):
     if mode == "nat-auto":
         network.update(pick_free_subnet())
         network["name"] = net_cfg.get("name", f"{vm_name}-net")
-        network["zone"] = net_cfg.get("zone", f"{vm_name}-zone")
+        network["libvirt_network_name"] = network["name"]
+        network["bridge_name"] = net_cfg.get("bridge_name", default_nat_bridge_name(vm_name))
+        network["profile"] = "isolated_nat"
         return network
 
     if mode == "nat-custom":
@@ -166,7 +202,9 @@ def build_network_config(vm_name, net_cfg):
 
         _validate_nat_custom_network(network)
         network["name"] = net_cfg.get("name", f"{vm_name}-net")
-        network["zone"] = net_cfg.get("zone", f"{vm_name}-zone")
+        network["libvirt_network_name"] = network["name"]
+        network["bridge_name"] = net_cfg.get("bridge_name", default_nat_bridge_name(vm_name))
+        network["profile"] = "isolated_nat"
         return network
 
     if mode == "bridge":
@@ -174,6 +212,44 @@ def build_network_config(vm_name, net_cfg):
         network["vm_ip"] = net_cfg.get("vm_ip", "dhcp-from-router")
         network["cidr"] = net_cfg.get("cidr", "main-lan")
         return network
+
+    raise ValueError("network.mode must be nat-auto, nat-custom, or bridge")
+
+
+def restored_network_config(vm_name, restored_state, restored_config):
+    """Build the effective network settings for snapshot restoration.
+
+    Prefer the snapshotted VM state so runtime identity fields like MAC and
+    auto-assigned NAT addressing survive a restore.
+    """
+    state_network = dict(restored_state.get("network") or {})
+    if not state_network:
+        return build_network_config(vm_name, restored_config.get("network", {}))
+
+    config_network = dict(restored_config.get("network") or {})
+    profile = normalize_network_profile(state_network or config_network)
+    mode = state_network.get("mode") or config_network.get("mode", "nat-auto")
+    state_network["profile"] = profile
+    state_network["mode"] = mode
+    if "mac" not in state_network:
+        state_network["mac"] = config_network.get("mac") or random_mac()
+    state_network.setdefault("network_group_id", config_network.get("network_group_id"))
+    state_network.setdefault("group_name", config_network.get("group_name"))
+    state_network.setdefault("owner_user_id", config_network.get("owner_user_id"))
+    state_network.setdefault("libvirt_network_name", config_network.get("libvirt_network_name"))
+    state_network.setdefault("subnet_cidr", config_network.get("subnet_cidr") or config_network.get("cidr"))
+    state_network.setdefault("gateway_ip", config_network.get("gateway_ip") or config_network.get("gateway"))
+
+    if mode.startswith("nat") or profile in ("nat", "isolated_nat", "private"):
+        state_network.setdefault("name", config_network.get("libvirt_network_name") or config_network.get("name", f"{vm_name}-net"))
+        state_network.setdefault("bridge_name", config_network.get("bridge_name", default_nat_bridge_name(vm_name)))
+        return state_network
+
+    if mode == "bridge":
+        state_network.setdefault("bridge_name", config_network.get("bridge_name", "br0"))
+        state_network.setdefault("vm_ip", config_network.get("vm_ip", "dhcp-from-router"))
+        state_network.setdefault("cidr", config_network.get("cidr", "main-lan"))
+        return state_network
 
     raise ValueError("network.mode must be nat-auto, nat-custom, or bridge")
 
@@ -284,16 +360,16 @@ def load_setup_script_content(config_data, global_config):
 
 def build_network_arg(vm_name, network):
     """Build the ``virt-install --network`` argument for a VM."""
-    if network["mode"].startswith("nat"):
+    profile = normalize_network_profile(network)
+    if profile != "bridged":
         return f'network={network["name"]},model=virtio,mac={network["mac"]}'
 
     return f'bridge={network["bridge_name"]},model=virtio,mac={network["mac"]}'
 
 
 def ensure_host_services():
-    """Ensure the required libvirt and firewall services are enabled."""
+    """Ensure the required libvirt service is enabled."""
     run(["systemctl", "enable", "--now", "libvirtd"], sudo=True)
-    run(["systemctl", "enable", "--now", "firewalld"], sudo=True)
 
 
 def build_vm_state(vm_name, resolved_config_path, trust, vm_data_dir, network, ports, admin_key_path):
@@ -396,25 +472,67 @@ def render_seed_iso_for_definition(definition):
     return create_seed_iso(definition["vm_name"], user_data, meta_data)
 
 
+def is_libvirt_nat_network(network):
+    """Return whether the network is a libvirt-managed NAT-style network."""
+
+    profile = normalize_network_profile(network)
+    mode = str(network.get("mode") or "").strip().lower()
+    return mode.startswith("nat") or profile in ("nat", "isolated_nat", "private")
+
+
 def apply_runtime_networking(vm_name, network, trust, ports, state):
-    """Apply NAT networks and firewall rules for the VM when required."""
-    if network["mode"].startswith("nat"):
-        state["firewalld"] = {
-            "zone_created": apply_firewalld_nat_policy(network, trust, ports),
-        }
+    """Apply reconciled nftables networking policy for the VM when required."""
+    if network.get("network_group_id") or is_libvirt_nat_network(network):
         save_vm_state(vm_name, state)
+        reconcile_networking(policy_only=not network.get("network_group_id"))
         return
 
-    print("Bridge mode selected: skipping host NAT firewall/port-forward rules.")
-    print("Use your router/VLAN firewall for isolation.")
+    print("Bridge mode selected: skipping host NAT and nftables VM policy rules.")
+    print("Use your router or VLAN policy for isolation.")
+
+
+def build_managed_vm_record(vm_name, vm, network, ports, config_path):
+    """Build a reconciler VM record for one managed-network VM definition."""
+    return {
+        "vm_name": vm_name,
+        "config_path": str(config_path),
+        "owner_user_id": vm.get("owner_user_id"),
+        "network_group_id": network.get("network_group_id"),
+        "network_group_name": network.get("group_name"),
+        "profile": normalize_network_profile(network),
+        "libvirt_network_name": network.get("libvirt_network_name") or network.get("name"),
+        "bridge_name": network.get("bridge_name"),
+        "subnet_cidr": network.get("subnet_cidr") or network.get("cidr"),
+        "gateway_ip": network.get("gateway_ip") or network.get("gateway"),
+        "dhcp_start": network.get("dhcp_start"),
+        "dhcp_end": network.get("dhcp_end"),
+        "mac_address": vm.get("mac_address") or network.get("mac"),
+        "ip_address": vm.get("ip_address") or network.get("vm_ip"),
+        "allow_same_group_traffic": vm.get("allow_same_group_traffic", True),
+        "allow_host_access": vm.get("allow_host_access", True),
+        "allow_private_lan_access": bool(vm.get("allow_private_lan_access", False)),
+        "internet_access": vm.get("internet_access", True),
+        "ports": ports or [],
+        "state_exists": False,
+    }
+
+
+def planned_managed_vm_records(vm_name=None, replacement_record=None):
+    """Return managed VM records after optionally replacing one VM entry."""
+    records = [record for record in configured_vm_records() if record["vm_name"] != vm_name]
+    if replacement_record is not None:
+        records.append(replacement_record)
+    return records
 
 
 def merged_vm_network(vm_name, state):
     """Merge persisted VM network state with any live-discovered details."""
     network = dict(state.get("network") or {})
     network.update(discover_vm_network(vm_name) or {})
-    network.setdefault("name", f"{vm_name}-net")
-    network.setdefault("zone", f"{vm_name}-zone")
+    if is_libvirt_nat_network(network):
+        network.setdefault("name", f"{vm_name}-net")
+        network.setdefault("libvirt_network_name", network.get("name"))
+        network.setdefault("bridge_name", default_nat_bridge_name(vm_name))
     return network
 
 
@@ -468,17 +586,22 @@ def cleanup_vm_runtime_definition(vm_name, network, ports, remove_storage):
             undefine_cmd.append("--remove-all-storage")
         run(undefine_cmd, sudo=True, check=False)
 
-    cleanup_firewalld_vm_policy(vm_name, network, ports)
-    run(["virsh", "net-destroy", network["name"]], sudo=True, check=False)
-    run(["virsh", "net-undefine", network["name"]], sudo=True, check=False)
+    if network.get("network_group_id"):
+        if remove_storage:
+            cleanup_vm_storage(vm_name)
+        return
 
-    for bridge_name in {
-        network.get("bridge_name"),
-        default_nat_bridge_name(vm_name),
-        legacy_nat_bridge_name(vm_name),
-    }:
-        if bridge_name and bridge_interface_exists(bridge_name):
-            cleanup_bridge_interface(bridge_name)
+    if is_libvirt_nat_network(network):
+        run(["virsh", "net-destroy", network["name"]], sudo=True, check=False)
+        run(["virsh", "net-undefine", network["name"]], sudo=True, check=False)
+
+        for bridge_name in {
+            network.get("bridge_name"),
+            default_nat_bridge_name(vm_name),
+            legacy_nat_bridge_name(vm_name),
+        }:
+            if bridge_name and bridge_interface_exists(bridge_name):
+                cleanup_bridge_interface(bridge_name)
 
     if remove_storage:
         cleanup_vm_storage(vm_name)
@@ -593,9 +716,24 @@ def create(config_path):
     with host_lifecycle_lock("create", vm_name=vm_name):
         definition = prepare_vm_definition(config_path)
         vm_name = definition["vm_name"]
+        if definition["network"].get("network_group_id"):
+            validate_networking_changes(
+                vm_records=planned_managed_vm_records(
+                    vm_name,
+                    build_managed_vm_record(
+                        vm_name,
+                        definition["vm"],
+                        definition["network"],
+                        definition["ports"],
+                        definition["resolved_config_path"],
+                    ),
+                )
+            )
         save_vm_state(vm_name, definition["state"])
 
         ensure_host_services()
+        if definition["network"].get("network_group_id"):
+            reconcile_networking()
         base_img = ensure_base_image(definition["image_settings"])
         vm_disk = create_vm_disk(vm_name, definition["vm"]["disk_gb"], base_img)
         network_arg = build_network_arg(vm_name, definition["network"])
@@ -635,6 +773,11 @@ def start(vm_name):
     require_tools(["virsh"])
 
     with host_lifecycle_lock("start", vm_name=vm_name):
+        state = load_vm_state(vm_name)
+        if state.get("network", {}).get("network_group_id"):
+            reconcile_networking()
+        elif is_libvirt_nat_network(state.get("network") or {}):
+            reconcile_networking(policy_only=True)
         started = start_vm_domain(vm_name)
 
     if started:
@@ -818,7 +961,7 @@ def snapshot_restore(vm_name, snapshot_id):
                 copy_local_file(source_path, target_path)
 
         restored_config = load_config(target_config_path)
-        restored_network = build_network_config(vm_name, restored_config.get("network", {}))
+        restored_network = restored_network_config(vm_name, restored_state, restored_config)
         restored_ports = restored_state.get("ports") or restored_config.get("ports") or []
         restored_trust = restored_state.get("trust") or restored_config.get("vm", {}).get(
             "trust",
@@ -829,10 +972,25 @@ def snapshot_restore(vm_name, snapshot_id):
         restored_state["network"] = restored_network
         restored_state["ports"] = restored_ports
         restored_state["trust"] = restored_trust
+        if restored_network.get("network_group_id"):
+            validate_networking_changes(
+                vm_records=planned_managed_vm_records(
+                    vm_name,
+                    build_managed_vm_record(
+                        vm_name,
+                        restored_config.get("vm", {}),
+                        restored_network,
+                        restored_ports,
+                        target_config_path,
+                    ),
+                )
+            )
         save_vm_state(vm_name, restored_state)
 
         ensure_host_services()
-        if restored_network["mode"].startswith("nat"):
+        if restored_network.get("network_group_id"):
+            reconcile_networking()
+        elif restored_network["mode"].startswith("nat"):
             create_nat_network(vm_name, restored_network)
 
         virt_install(
@@ -886,6 +1044,19 @@ def clone(source_vm_name, config_path):
 
     with host_lifecycle_lock("clone", vm_name=target_vm_name):
         definition = prepare_vm_definition(config_path)
+        if definition["network"].get("network_group_id"):
+            validate_networking_changes(
+                vm_records=planned_managed_vm_records(
+                    target_vm_name,
+                    build_managed_vm_record(
+                        target_vm_name,
+                        definition["vm"],
+                        definition["network"],
+                        definition["ports"],
+                        definition["resolved_config_path"],
+                    ),
+                )
+            )
         save_vm_state(target_vm_name, definition["state"])
         source_state = load_vm_state(source_vm_name)
         source_config_path = source_state.get("config_path")
@@ -897,6 +1068,8 @@ def clone(source_vm_name, config_path):
         try:
             source_was_running = stop_vm_domain(source_vm_name)
             ensure_host_services()
+            if definition["network"].get("network_group_id"):
+                reconcile_networking()
 
             copy_qcow2_image(source_disk, target_disk)
             prepare_cloned_guest_disk(
@@ -1019,6 +1192,8 @@ def destroy(vm_name):
         state = load_vm_state(vm_name)
         network = merged_vm_network(vm_name, state)
         ports = state.get("ports") or []
+        if network.get("network_group_id"):
+            validate_networking_changes(vm_records=planned_managed_vm_records(vm_name))
 
         cleanup_vm_runtime_definition(vm_name, network, ports, remove_storage=True)
         cleanup_local_vm_artifacts(
@@ -1026,6 +1201,10 @@ def destroy(vm_name):
             admin_private_key=state.get("admin_private_key"),
             vm_data_dir=state.get("vm_data_dir"),
         )
+        if network.get("network_group_id"):
+            reconcile_networking()
+        elif is_libvirt_nat_network(network):
+            reconcile_networking(policy_only=True)
 
 
 def build_parser():
@@ -1067,6 +1246,10 @@ def build_parser():
     snapshot_delete_parser.add_argument("name")
     snapshot_delete_parser.add_argument("snapshot_id")
 
+    reconcile_parser = subcommands.add_parser("reconcile")
+    reconcile_parser.add_argument("--policy-only", action="store_true")
+    reconcile_parser.add_argument("--allow-destructive", action="store_true")
+
     ssh_admin_parser = subcommands.add_parser("ssh-admin")
     ssh_admin_parser.add_argument("name")
     ssh_admin_parser.add_argument("--ip")
@@ -1100,5 +1283,10 @@ def main(argv=None):
         snapshot_restore(args.name, args.snapshot_id)
     elif args.command == "snapshot-delete":
         snapshot_delete(args.name, args.snapshot_id)
+    elif args.command == "reconcile":
+        reconcile_networking(
+            policy_only=args.policy_only,
+            allow_destructive=args.allow_destructive,
+        )
     elif args.command == "ssh-admin":
         ssh_admin(args.name, args.ip)

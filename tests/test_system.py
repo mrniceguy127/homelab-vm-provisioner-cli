@@ -9,12 +9,21 @@ from homelab_vm_provisioner import system
 
 class ToolExistsTests(unittest.TestCase):
     def test_returns_true_when_command_exists(self):
-        with patch.object(system.subprocess, "run", return_value=completed_process(returncode=0)):
+        with patch.object(system.shutil, "which", return_value="/usr/bin/virsh"):
             self.assertTrue(system.tool_exists("virsh"))
 
     def test_returns_false_when_command_is_missing(self):
-        with patch.object(system.subprocess, "run", return_value=completed_process(returncode=1)):
+        with patch.object(system.shutil, "which", return_value=None):
             self.assertFalse(system.tool_exists("virsh"))
+
+
+class NormalizedCommandPathTests(unittest.TestCase):
+    def test_appends_standard_system_paths(self):
+        path_value = system.normalized_command_path("/custom/bin:/usr/bin")
+
+        self.assertIn("/custom/bin", path_value.split(":"))
+        self.assertIn("/usr/sbin", path_value.split(":"))
+        self.assertIn("/sbin", path_value.split(":"))
 
 
 class RunTests(unittest.TestCase):

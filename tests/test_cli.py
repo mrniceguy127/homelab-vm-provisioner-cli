@@ -1,3 +1,4 @@
+import contextlib
 import tempfile
 import textwrap
 import unittest
@@ -42,7 +43,9 @@ class BuildNetworkConfigTests(unittest.TestCase):
                     "dhcp_start": "192.168.120.50",
                     "dhcp_end": "192.168.120.99",
                     "name": "demo-net",
-                    "zone": "demo-zone",
+                    "libvirt_network_name": "demo-net",
+                    "bridge_name": cli.default_nat_bridge_name("demo"),
+                    "profile": "isolated_nat",
                 },
             )
 
@@ -92,7 +95,9 @@ class BuildNetworkConfigTests(unittest.TestCase):
                     "dhcp_start": "192.168.240.60",
                     "dhcp_end": "192.168.240.99",
                     "name": "demo-net",
-                    "zone": "demo-zone",
+                    "libvirt_network_name": "demo-net",
+                    "bridge_name": cli.default_nat_bridge_name("demo"),
+                    "profile": "isolated_nat",
                 },
             )
 
@@ -182,11 +187,11 @@ class BuildNetworkConfigTests(unittest.TestCase):
 
 class VmNameValidationTests(unittest.TestCase):
     def test_accepts_vm_name_at_limit(self):
-        self.assertIsNone(cli.validate_vm_name("a" * 12))
+        self.assertIsNone(cli.validate_vm_name("a" * 63))
 
     def test_rejects_vm_name_over_limit(self):
-        with self.assertRaisesRegex(ValueError, "vm.name must be 12 characters or fewer"):
-            cli.validate_vm_name("a" * 13)
+        with self.assertRaisesRegex(ValueError, "vm.name must be 63 characters or fewer"):
+            cli.validate_vm_name("a" * 64)
 
 
 class SummaryTests(unittest.TestCase):
@@ -238,6 +243,14 @@ class ParserAndMainTests(unittest.TestCase):
         self.assertEqual(args.command, "destroy")
         self.assertEqual(args.name, "demo")
 
+    def test_build_parser_parses_reconcile_flags(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["reconcile", "--policy-only", "--allow-destructive"])
+
+        self.assertEqual(args.command, "reconcile")
+        self.assertTrue(args.policy_only)
+        self.assertTrue(args.allow_destructive)
+
     def test_main_dispatches_create(self):
         with patch.object(cli, "create") as create_mock:
             cli.main(["create", "configs/demo.yaml"])
@@ -249,6 +262,12 @@ class ParserAndMainTests(unittest.TestCase):
             cli.main(["destroy", "demo"])
 
         destroy_mock.assert_called_once_with("demo")
+
+    def test_main_dispatches_reconcile_with_flags(self):
+        with patch.object(cli, "reconcile_networking") as reconcile_mock:
+            cli.main(["reconcile", "--policy-only", "--allow-destructive"])
+
+        reconcile_mock.assert_called_once_with(policy_only=True, allow_destructive=True)
 
     def test_main_dispatches_ssh_admin(self):
         with patch.object(cli, "ssh_admin") as ssh_admin_mock:
@@ -367,8 +386,8 @@ class CreateTests(unittest.TestCase):
             ), patch.object(
                 cli, "virt_install"
             ) as virt_install_mock, patch.object(
-                cli, "apply_firewalld_nat_policy", return_value=False
-            ) as firewall_mock:
+                cli, "reconcile_networking"
+            ) as reconcile_mock:
                 cli.create(str(config_path))
 
         expected_network = {
@@ -381,7 +400,9 @@ class CreateTests(unittest.TestCase):
             "dhcp_start": "192.168.240.50",
             "dhcp_end": "192.168.240.99",
             "name": "demo-net",
-            "zone": "demo-zone",
+            "libvirt_network_name": "demo-net",
+            "bridge_name": cli.default_nat_bridge_name("demo"),
+            "profile": "isolated_nat",
         }
 
         vm_data_dir_mock.assert_called_once()
@@ -461,7 +482,7 @@ class CreateTests(unittest.TestCase):
         self.assertEqual(first_state["admin_private_key"], str(admin_key))
 
         second_state = save_state_mock.call_args_list[1].args[1]
-        self.assertEqual(second_state["firewalld"], {"zone_created": False})
+        self.assertEqual(second_state["network"], expected_network)
 
         virt_install_mock.assert_called_once_with(
             "demo",
@@ -481,11 +502,7 @@ class CreateTests(unittest.TestCase):
             Path("/images/demo-seed.iso"),
             "ubuntu24.04",
         )
-        firewall_mock.assert_called_once_with(
-            expected_network,
-            "untrusted",
-            [{"host": 2222, "guest": 22}],
-        )
+        reconcile_mock.assert_called_once_with(policy_only=True)
         self.assertEqual(save_state_mock.call_count, 2)
 
     def test_rejects_invalid_trust_value(self):
@@ -526,7 +543,7 @@ class CreateTests(unittest.TestCase):
                 textwrap.dedent(
                     f"""\
                     vm:
-                      name: grant-minecraft
+                      name: {'a' * 64}
                       user: tenant
                       ssh_key_file: {tenant_key.as_posix()}
                       ram_mb: 4096
@@ -540,7 +557,7 @@ class CreateTests(unittest.TestCase):
             with patch.object(cli, "require_tools"), patch.object(
                 cli, "load_global_config", return_value={}
             ), patch.object(cli, "save_vm_state") as save_vm_state_mock:
-                with self.assertRaisesRegex(ValueError, "vm.name must be 12 characters or fewer"):
+                with self.assertRaisesRegex(ValueError, "vm.name must be 63 characters or fewer"):
                     cli.create(str(config_path))
 
         save_vm_state_mock.assert_not_called()
@@ -673,7 +690,7 @@ class CreateTests(unittest.TestCase):
             ), patch.object(
                 cli, "virt_install"
             ), patch.object(
-                cli, "apply_firewalld_nat_policy", return_value=False
+                cli, "reconcile_networking"
             ):
                 cli.create(str(config_path))
 
@@ -684,7 +701,7 @@ class CreateTests(unittest.TestCase):
         first_state = save_state_mock.call_args_list[0].args[1]
         self.assertEqual(first_state["admin_private_key"], str(admin_key))
 
-    def test_bridge_mode_skips_nat_firewall_and_uses_bridge_network_arg(self):
+    def test_bridge_mode_skips_nft_policy_and_uses_bridge_network_arg(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             tenant_key = tmpdir_path / "tenant.pub"
@@ -751,11 +768,11 @@ class CreateTests(unittest.TestCase):
             ), patch.object(
                 cli, "virt_install"
             ) as virt_install_mock, patch.object(
-                cli, "apply_firewalld_nat_policy"
-            ) as firewall_mock, patch("builtins.print") as print_mock:
+                cli, "reconcile_networking"
+            ) as reconcile_mock, patch("builtins.print") as print_mock:
                 cli.create(str(config_path))
 
-        firewall_mock.assert_not_called()
+        reconcile_mock.assert_not_called()
         self.assertEqual(save_state_mock.call_count, 1)
         virt_install_mock.assert_called_once_with(
             "demo",
@@ -774,6 +791,231 @@ class CreateTests(unittest.TestCase):
         )
         printed = printed_output(print_mock)
         self.assertIn("Bridge mode selected", printed)
+
+    def test_managed_create_validates_networking_before_saving_state(self):
+        definition = {
+            "vm_name": "demo",
+            "vm": {
+                "name": "demo",
+                "owner_user_id": "user-admin",
+                "network_group_id": "ng-demo",
+                "mac_address": "52:54:00:11:22:33",
+                "ip_address": "10.80.0.2",
+                "allow_same_group_traffic": True,
+                "allow_private_lan_access": False,
+                "internet_access": True,
+            },
+            "network": {
+                "network_group_id": "ng-demo",
+                "group_name": "default-admin",
+                "profile": "isolated_nat",
+                "libvirt_network_name": "hvp-ng-demo",
+                "name": "hvp-ng-demo",
+                "bridge_name": "hvpb-demo",
+                "subnet_cidr": "10.80.0.0/28",
+                "gateway_ip": "10.80.0.1",
+                "dhcp_start": "10.80.0.2",
+                "dhcp_end": "10.80.0.14",
+                "vm_ip": "10.80.0.2",
+                "mac": "52:54:00:11:22:33",
+            },
+            "ports": [],
+            "resolved_config_path": "/configs/demo.yaml",
+            "state": {"vm_name": "demo"},
+        }
+
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_config", return_value={"vm": {"name": "demo"}}
+        ), patch.object(
+            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
+        ), patch.object(
+            cli, "prepare_vm_definition", return_value=definition
+        ), patch.object(
+            cli, "configured_vm_records", return_value=[]
+        ), patch.object(
+            cli, "validate_networking_changes", side_effect=RuntimeError("blocked")
+        ) as validate_mock, patch.object(cli, "save_vm_state") as save_state_mock:
+            with self.assertRaisesRegex(RuntimeError, "blocked"):
+                cli.create("/configs/demo.yaml")
+
+        validate_mock.assert_called_once()
+        save_state_mock.assert_not_called()
+
+
+class SnapshotRestoreTests(unittest.TestCase):
+    def test_restore_preserves_snapshot_mac_and_nat_network_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            snapshot_path = tmpdir_path / "snapshots" / "snap-1"
+            snapshot_path.mkdir(parents=True)
+            (snapshot_path / "demo.qcow2").write_text("disk", encoding="utf-8")
+            (snapshot_path / "demo-seed.iso").write_text("seed", encoding="utf-8")
+            (snapshot_path / "config.yaml").write_text(
+                textwrap.dedent(
+                    """\
+                    vm:
+                      name: demo
+                      user: tenant
+                      ram_mb: 4096
+                      vcpus: 2
+                      disk_gb: 40
+
+                    network:
+                      mode: nat-auto
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (snapshot_path / "state.yaml").write_text(
+                textwrap.dedent(
+                    """\
+                    vm_name: demo
+                    config_path: /configs/demo.yaml
+                    trust: trusted
+                    ports:
+                      - host: 2222
+                        guest: 22
+                    network:
+                      mode: nat-auto
+                      mac: 52:54:00:11:22:33
+                      prefix: 192.168.240
+                      cidr: 192.168.240.0/24
+                      gateway: 192.168.240.1
+                      vm_ip: 192.168.240.50
+                      dhcp_start: 192.168.240.50
+                      dhcp_end: 192.168.240.99
+                      name: demo-net
+                      bridge_name: {cli.default_nat_bridge_name('demo')}
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            current_state = {
+                "network": {
+                    "mode": "nat-auto",
+                    "mac": "52:54:00:aa:bb:cc",
+                    "prefix": "192.168.122",
+                    "cidr": "192.168.122.0/24",
+                    "gateway": "192.168.122.1",
+                    "vm_ip": "192.168.122.50",
+                    "dhcp_start": "192.168.122.50",
+                    "dhcp_end": "192.168.122.99",
+                    "name": "demo-net",
+                    "bridge_name": cli.default_nat_bridge_name("demo"),
+                },
+                "ports": [{"host": 2222, "guest": 22}],
+            }
+            restored_state = {
+                "vm_name": "demo",
+                "config_path": "/configs/demo.yaml",
+                "trust": "trusted",
+                "ports": [{"host": 2222, "guest": 22}],
+                "network": {
+                    "mode": "nat-auto",
+                    "mac": "52:54:00:11:22:33",
+                    "prefix": "192.168.240",
+                    "cidr": "192.168.240.0/24",
+                    "gateway": "192.168.240.1",
+                    "vm_ip": "192.168.240.50",
+                    "dhcp_start": "192.168.240.50",
+                    "dhcp_end": "192.168.240.99",
+                    "name": "demo-net",
+                    "bridge_name": cli.default_nat_bridge_name("demo"),
+                },
+            }
+            restored_config = {
+                "vm": {
+                    "name": "demo",
+                    "user": "tenant",
+                    "ram_mb": 4096,
+                    "vcpus": 2,
+                    "disk_gb": 40,
+                },
+                "network": {"mode": "nat-auto"},
+            }
+
+            target_config_path = tmpdir_path / "configs" / "demo.yaml"
+            target_state_path = tmpdir_path / "vm" / "state" / "demo.yaml"
+            vm_disk = tmpdir_path / "images" / "demo.qcow2"
+            seed_iso = tmpdir_path / "images" / "demo-seed.iso"
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(cli, "require_tools"))
+                stack.enter_context(
+                    patch.object(
+                        cli,
+                        "load_snapshot_metadata",
+                        return_value={
+                            "original_paths": {
+                                "config_path": str(target_config_path),
+                                "state_path": str(target_state_path),
+                            }
+                        },
+                    )
+                )
+                stack.enter_context(
+                    patch.object(cli, "snapshot_path_for_vm", return_value=snapshot_path)
+                )
+                stack.enter_context(
+                    patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext())
+                )
+                stack.enter_context(
+                    patch.object(cli, "load_vm_state", side_effect=[current_state, restored_state])
+                )
+                stack.enter_context(
+                    patch.object(cli, "merged_vm_network", return_value=current_state["network"])
+                )
+                stack.enter_context(patch.object(cli, "cleanup_vm_runtime_definition"))
+                stack.enter_context(patch.object(cli, "copy_qcow2_image"))
+                stack.enter_context(patch.object(cli, "copy_image_artifact"))
+                stack.enter_context(patch.object(cli, "copy_local_file"))
+                stack.enter_context(patch.object(cli, "copy_local_tree"))
+                stack.enter_context(patch.object(cli, "load_config", return_value=restored_config))
+                save_vm_state_mock = stack.enter_context(patch.object(cli, "save_vm_state"))
+                stack.enter_context(patch.object(cli, "ensure_host_services"))
+                create_nat_network_mock = stack.enter_context(
+                    patch.object(cli, "create_nat_network")
+                )
+                virt_install_mock = stack.enter_context(patch.object(cli, "virt_install"))
+                stack.enter_context(patch.object(cli, "stop_vm_domain"))
+                stack.enter_context(patch.object(cli, "apply_runtime_networking"))
+                stack.enter_context(patch.object(cli, "vm_disk_path", return_value=vm_disk))
+                stack.enter_context(patch.object(cli, "seed_iso_path", return_value=seed_iso))
+                stack.enter_context(patch.object(cli, "load_global_config", return_value={}))
+                stack.enter_context(
+                    patch.object(cli, "image_settings_for_config", return_value={"os_variant": "ubuntu24.04"})
+                )
+                stack.enter_context(
+                    patch.object(
+                        cli,
+                        "pick_free_subnet",
+                        side_effect=AssertionError("should not recalculate subnet"),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        cli,
+                        "random_mac",
+                        side_effect=AssertionError("should not regenerate MAC"),
+                    )
+                )
+                stack.enter_context(patch("builtins.print"))
+
+                cli.snapshot_restore("demo", "snap-1")
+
+        saved_state = save_vm_state_mock.call_args.args[1]
+        self.assertEqual(saved_state["network"]["mac"], "52:54:00:11:22:33")
+        self.assertEqual(saved_state["network"]["prefix"], "192.168.240")
+        create_nat_network_mock.assert_called_once_with("demo", saved_state["network"])
+        virt_install_mock.assert_called_once_with(
+            "demo",
+            restored_config["vm"],
+            "network=demo-net,model=virtio,mac=52:54:00:11:22:33",
+            vm_disk,
+            seed_iso,
+            "ubuntu24.04",
+        )
 
 
 class SshAdminTests(unittest.TestCase):
@@ -889,13 +1131,36 @@ class SshAdminTests(unittest.TestCase):
 
 
 class DestroyTests(unittest.TestCase):
+    def test_destroy_validates_managed_networking_before_teardown(self):
+        with patch.object(
+            cli,
+            "host_lifecycle_lock",
+            return_value=contextlib.nullcontext(),
+        ), patch.object(
+            cli, "load_vm_state", return_value={"ports": []}
+        ), patch.object(
+            cli,
+            "merged_vm_network",
+            return_value={"network_group_id": "ng-demo", "libvirt_network_name": "hvp-ng-demo"},
+        ), patch.object(
+            cli, "configured_vm_records", return_value=[]
+        ), patch.object(
+            cli, "validate_networking_changes", side_effect=RuntimeError("blocked")
+        ) as validate_mock, patch.object(
+            cli, "cleanup_vm_runtime_definition"
+        ) as cleanup_mock:
+            with self.assertRaisesRegex(RuntimeError, "blocked"):
+                cli.destroy("demo")
+
+        validate_mock.assert_called_once()
+        cleanup_mock.assert_not_called()
+
     def test_destroy_merges_state_and_live_network_then_cleans_everything(self):
         state = {
             "admin_private_key": "/vm/keys/admin/demo_admin_ed25519",
             "vm_data_dir": "/vm/data/demo",
             "network": {
                 "name": "state-net",
-                "zone": "custom-demo-zone",
                 "cidr": "192.168.240.0/24",
                 "vm_ip": "192.168.240.50",
             },
@@ -913,24 +1178,15 @@ class DestroyTests(unittest.TestCase):
         ) as bridge_exists_mock, patch.object(
             cli, "cleanup_bridge_interface"
         ) as cleanup_bridge_mock, patch.object(
-            cli, "cleanup_firewalld_vm_policy"
-        ) as cleanup_firewall_mock, patch.object(
             cli, "cleanup_vm_storage"
         ) as cleanup_storage_mock, patch.object(
             cli, "cleanup_local_vm_artifacts"
-        ) as cleanup_artifacts_mock, patch.object(cli, "run") as run_mock:
+        ) as cleanup_artifacts_mock, patch.object(
+            cli, "reconcile_networking"
+        ) as reconcile_mock, patch.object(cli, "run") as run_mock:
             cli.destroy("demo")
 
-        cleanup_firewall_mock.assert_called_once_with(
-            "demo",
-            {
-                "name": "live-net",
-                "zone": "custom-demo-zone",
-                "cidr": "192.168.240.0/24",
-                "vm_ip": "192.168.240.55",
-            },
-            [{"host": 2222, "guest": 22, "proto": "tcp"}],
-        )
+        reconcile_mock.assert_called_once_with(policy_only=True)
         cleanup_storage_mock.assert_called_once_with("demo")
         self.assertEqual(bridge_exists_mock.call_count, 2)
         cleanup_bridge_mock.assert_has_calls(
@@ -963,13 +1219,12 @@ class DestroyTests(unittest.TestCase):
             cli, "bridge_interface_exists", side_effect=[False, False]
         ), patch.object(
             cli, "cleanup_bridge_interface"
-        ) as cleanup_bridge_mock, patch.object(
-            cli, "cleanup_firewalld_vm_policy"
-        ), patch.object(cli, "cleanup_vm_storage"), patch.object(
+        ) as cleanup_bridge_mock, patch.object(cli, "cleanup_vm_storage"), patch.object(
             cli, "cleanup_local_vm_artifacts"
-        ), patch.object(cli, "run") as run_mock:
+        ), patch.object(cli, "reconcile_networking") as reconcile_mock, patch.object(cli, "run") as run_mock:
             cli.destroy("demo")
 
+        reconcile_mock.assert_called_once_with(policy_only=True)
         self.assertEqual(
             run_mock.call_args_list,
             [

@@ -14,10 +14,12 @@ A lightweight KVM/libvirt provisioning tool for creating and managing virtual ma
 - NAT and bridge networking
 - Automatic subnet allocation
 - Custom subnet support
-- Firewalld integration
+- Native nftables-managed VM networking policy
 - Port forwarding support
 - YAML-based configuration
 - Trusted and isolated VM modes
+
+Managed nftables table details and verification guidance live in `../docs/vm-networking-nftables.md`.
 
 ## Quick Start
 
@@ -115,10 +117,11 @@ ROOT
 │   ├── __main__.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── managed_nftables.py
 │   ├── constants.py
-│   ├── firewall.py
 │   ├── network.py
 │   ├── provision.py
+│   ├── reconciler.py
 │   ├── system.py
 │   └── templates/
 │       ├── base-user-data.yaml.j2
@@ -135,10 +138,11 @@ ROOT
 ├── tests/
 │   ├── test_cli.py
 │   ├── test_config.py
-│   ├── test_firewall.py
 │   ├── test_integration.py
+│   ├── test_managed_nftables.py
 │   ├── test_network.py
-│   └── test_provision.py
+│   ├── test_provision.py
+│   └── test_reconciler.py
 │
 ├── configs/
 │   ├── template.yaml.example
@@ -232,7 +236,7 @@ cp configs/template.yaml.example configs/my-vm.yaml
 ./vmctl destroy devbox
 ```
 
-This removes the VM, attached libvirt storage, VM-specific libvirt network, VM-specific firewalld state, generated files under the VM data directory, generated admin keys, and the tracked state file.
+This removes the VM, attached libvirt storage, VM-specific libvirt network, generated files under the VM data directory, generated admin keys, and the tracked state file.
 
 ## SSH to a VM as administrator
 
@@ -328,7 +332,7 @@ This discovers both unit and integration tests under `tests/`.
 
 Integration coverage lives in `tests/test_integration.py`.
 
-It exercises `create`, `destroy`, and `ssh-admin` through `cli.main()` while faking host-side commands such as `virsh`, `ssh`, image creation, and firewalld calls.
+It exercises `create`, `destroy`, and `ssh-admin` through `cli.main()` while faking host-side commands such as `virsh`, `ssh`, image creation, and nftables reconciliation calls.
 
 ## Run coverage
 
@@ -424,7 +428,7 @@ vm:
 
 | Field | Required | Type | Default | Description |
 |----------|----------|----------|----------|----------|
-| name | Yes | string | N/A | VM name. Keep it at 12 characters or fewer |
+| name | Yes | string | N/A | VM name. Keep it at 63 characters or fewer |
 | user | Yes | string | N/A | User account created inside VM |
 | ssh_key_file | No | string | None | Tenant public key. Bare filenames resolve under `vm/keys/users/` by default |
 | ram_mb | Yes | integer | N/A | Memory allocation |
@@ -440,10 +444,6 @@ vm:
 |----------|----------|
 | trusted | Full network access |
 | untrusted | Private networks blocked |
-
-Notes:
-
-- `vm.name` is limited to 12 characters so the default firewalld zone name `<vm>-zone` stays within firewalld's 17-character limit.
 
 ## paths Section
 
@@ -555,7 +555,6 @@ Generated values:
 | DHCP End | 192.168.137.99 |
 | Guest resolvers | 1.1.1.1, 1.0.0.1 |
 | Network Name | `<vm>-net` |
-| Firewall Zone | `<vm>-zone` |
 | MAC Address | Random |
 
 ## NAT Custom
@@ -589,7 +588,6 @@ Generated defaults:
 | dhcp_start | Conditional | Generated |
 | dhcp_end | Conditional | Generated |
 | name | No | `<vm>-net` |
-| zone | No | `<vm>-zone` |
 | mac | No | Random |
 
 ## Bridge
@@ -666,9 +664,8 @@ ports:
 
 Notes:
 
-- For NAT-backed VMs, forwarded ports automatically install matching firewalld direct `FORWARD` accept rules so host and remote traffic can actually reach the guest port.
-- Those direct rules use a strongly negative priority (`-1000`) as a compatibility workaround so the accept rules win early in the `FORWARD` chain on hosts where later/default-priority rules would still leave guest traffic filtered.
-- On hosts where libvirt's nft-managed `LIBVIRT_FWI` chain still rejects forwarded guest traffic, the tool also discovers the real nft table that owns `LIBVIRT_FWI`, finds the bridge-specific `reject` rule handle, and inserts the per-port allow rule ahead of that reject by handle. This avoids brittle assumptions about fixed table names or rule positions.
+- For NAT-backed VMs, forwarded ports are reconciled into the application-owned `hvp_nat` and `hvp_filter` tables.
+- Same-subnet VMs that share a bridge are filtered in `hvp_bridge_filter` so same-group isolation still applies before traffic is switched locally.
 
 ---
 

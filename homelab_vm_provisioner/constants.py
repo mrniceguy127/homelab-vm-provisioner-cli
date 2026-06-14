@@ -20,14 +20,14 @@ DEFAULT_REQUIRED_TOOLS = (
     "virt-install",
     "qemu-img",
     "cloud-localds",
-    "firewall-cmd",
+    "nft",
     "ssh-keygen",
     "wget",
 )
 
 INSTALL_HINT = (
     "sudo apt install -y libvirt-daemon-system virtinst qemu-utils "
-    "cloud-image-utils firewalld wget openssh-client python3-yaml python3-jinja2"
+    "cloud-image-utils nftables wget openssh-client python3-yaml python3-jinja2"
 )
 
 BLOCKED_PRIVATE_RANGES = [
