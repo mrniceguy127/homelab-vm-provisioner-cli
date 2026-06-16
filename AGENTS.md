@@ -1,243 +1,104 @@
 # Homelab VM Provisioner - Python CLI
 
-Python CLI tool for provisioning and managing libvirt VMs with cloud-init and nftables firewall configuration.
+Python CLI for provisioning and managing libvirt VMs with cloud-init and nftables.
 
-## Architecture
-
-### Core Components
-
-- **CLI** (`cli.py`): Command-line interface using argparse
-- **Provisioning** (`provision.py`): VM lifecycle management via libvirt
-- **Configuration** (`config.py`): YAML configuration parsing
-- **Networking** (`network.py`): Network bridge and interface management
-- **Firewall** (`managed_nftables.py`): nftables rule generation and management
-- **Reconciliation** (`reconciler.py`): State reconciliation and drift detection
-
-### Technology Stack
-
-- **Language**: Python 3.9+
-- **Testing**: unittest (NOT pytest)
-- **Coverage**: coverage.py with 85% minimum enforced
-- **Documentation**: Sphinx + RST + Google-style docstrings
-- **Linting**: ruff (E, F, I rules)
-- **Dependencies**: libvirt-python, Jinja2, PyYAML
-
-## Build and Test
-
-### Commands
+## Quick Start
 
 ```bash
-./vmctl provision <name>          # Provision a VM
-./vmctl list                      # List all VMs
-./vmctl stop <name>               # Stop a VM
-./vmctl start <name>              # Start a VM
-./vmctl destroy <name>            # Destroy a VM
-
-./scripts/test                    # Run unittest suite
-./scripts/coverage                # Run tests with coverage (85% enforced)
-./scripts/lint                    # Run ruff linter
-./scripts/docs-build              # Build Sphinx documentation
+./vmctl provision <name>       # Provision VM
+./vmctl list                   # List VMs
+./scripts/test                 # Run tests
+./scripts/coverage             # Test with 85% enforcement
+./scripts/lint                 # Ruff linting
+./scripts/docs-build           # Build Sphinx docs
 ```
 
-### Configuration
+## Project Structure
 
-VMs are defined in `vmctl.yaml`:
-
-```yaml
-vms:
-  - name: web-server
-    memory: 2048
-    cpu: 2
-    networks:
-      - default
-    disk_size: 20G
 ```
+homelab_vm_provisioner/
+├── cli.py              # CLI commands (argparse)
+├── provision.py        # VM lifecycle management
+├── config.py           # YAML config parsing
+├── network.py          # Network management
+├── managed_nftables.py # Firewall rules
+├── reconciler.py       # State reconciliation
+└── templates/          # Cloud-init Jinja2 templates
 
-Cloud-init templates are in `homelab_vm_provisioner/templates/`.
+tests/
+├── test_cli.py         # CLI tests
+├── test_provision.py   # Provisioning tests
+└── ...                 # Other test modules
+```
 
 ## Code Style
 
-### Python Conventions
+**Language**: Python 3.9+  
+**Testing**: unittest (NOT pytest)  
+**Coverage**: 85% minimum (ENFORCED - build fails if below)  
+**Linting**: ruff (E, F, I rules)  
+**Docs**: Google-style docstrings + Sphinx RST
 
-- Python 3.9+ compatible
-- Google-style docstrings
-- Type hints optional but encouraged
-- 100 character line length
-- Use `if __name__ == '__main__':` for entry points
+**Key Patterns**:
+- Google-style docstrings for all public functions
+- Mock libvirt and subprocess calls in tests
+- Use `unittest.TestCase` with `self.assertEqual()`
+- Always close libvirt connections (use try/finally)
 
-### Testing Conventions
+## Firewall / nftables Invariants
 
-- **Framework**: unittest (NOT pytest)
-- **Location**: `tests/test_<module>.py`
-- **Coverage**: 85% minimum (enforced by build)
-- **Mocking**: Mock libvirt and subprocess calls
-- **Structure**: One TestCase class per module function/class
+- Do not introduce firewalld.
+- nftables is the managed firewall source of truth.
+- Only modify owned/managed nftables tables and chains.
+- Do not patch foreign-owned chains.
+- Generated rules must be deterministic.
+- Before changing packet filtering, identify packet path, hook, source, destination, NAT ordering, and earlier accept/drop rules.
+- Prefer tests around rendered nftables output over tests that require root, real bridges, or live nftables state.
 
-### Example Test
+## AI Agents
 
-```python
-import unittest
-from unittest.mock import MagicMock, patch
-from homelab_vm_provisioner.provision import provision_vm
+Project-specific OpenCode agents live in `.opencode/agents/`.
 
-class TestProvisionVM(unittest.TestCase):
-    @patch('homelab_vm_provisioner.provision.libvirt')
-    def test_provision_vm_success(self, mock_libvirt):
-        """Test successful VM provisioning."""
-        mock_conn = MagicMock()
-        mock_domain = MagicMock()
-        
-        mock_libvirt.open.return_value = mock_conn
-        mock_conn.defineXML.return_value = mock_domain
-        
-        result = provision_vm('test-vm', 2048, 2, ['default'])
-        
-        self.assertEqual(result['name'], 'test-vm')
-        mock_domain.create.assert_called_once()
+### Usage
+
+```bash
+# Direct invocation (recommended)
+@.opencode/agents/test-writer.md Write tests for provision.py
+@.opencode/agents/coverage-runner.md Check coverage
 ```
-
-## Documentation
-
-### Docstring Format (Google Style)
-
-```python
-def provision_vm(name, memory, cpu, networks):
-    """Provision a new virtual machine.
-    
-    Creates a new VM with the specified configuration using libvirt.
-    
-    Args:
-        name: VM hostname (alphanumeric, hyphens allowed)
-        memory: Memory in MB (minimum 512)
-        cpu: Number of vCPUs (1-16)
-        networks: List of network names
-    
-    Returns:
-        Dict with VM details (name, uuid, status)
-    
-    Raises:
-        ValueError: If parameters are invalid
-        RuntimeError: If libvirt operation fails
-    
-    Example:
-        >>> result = provision_vm('web-01', 2048, 2, ['default'])
-        >>> print(result['status'])
-        running
-    """
-```
-
-### Sphinx Documentation
-
-- **Location**: `docs/`
-- **Build**: `./scripts/docs-build`
-- **Output**: `docs/_build/html/index.html`
-- **Format**: RST files with code-block examples
-
-## Common Patterns
-
-### Error Handling
-
-```python
-def validate_config(config):
-    """Validate VM configuration."""
-    if not config.get('name'):
-        raise ValueError("VM name is required")
-    
-    if config.get('memory', 0) < 512:
-        raise ValueError("Memory must be at least 512 MB")
-```
-
-### libvirt Operations
-
-```python
-conn = libvirt.open('qemu:///system')
-try:
-    domain = conn.lookupByName(vm_name)
-    domain.create()  # Start VM
-finally:
-    conn.close()  # Always close connection
-```
-
-### Cloud-init Templates
-
-Uses Jinja2 templates in `homelab_vm_provisioner/templates/`:
-- `base-user-data.yaml.j2` - Cloud-init user-data
-- `meta-data.yaml.j2` - Cloud-init meta-data
-
-## Specialized Agents
-
-This project uses specialized agents for common development tasks:
 
 ### Available Agents
 
-| Agent | Purpose | Usage |
-|-------|---------|-------|
-| test-writer | Write unittest tests | OpenCode: `@homelab-vm-provisioner-api/homelab-vm-provisioner/agents/test-writer.agent.md` |
-| coverage-runner | Analyze test coverage | OpenCode: `@homelab-vm-provisioner-api/homelab-vm-provisioner/agents/coverage-runner.agent.md` |
-| feature-developer | Implement new features | OpenCode: `@homelab-vm-provisioner-api/homelab-vm-provisioner/agents/feature-developer.agent.md` |
-| defect-fixer | Debug and fix bugs | OpenCode: `@homelab-vm-provisioner-api/homelab-vm-provisioner/agents/defect-fixer.agent.md` |
-| doc-writer | Write documentation | OpenCode: `@homelab-vm-provisioner-api/homelab-vm-provisioner/agents/doc-writer.agent.md` |
+- **test-writer.md** - unittest + libvirt mocking
+- **coverage-runner.md** - 85% enforcement
+- **feature-developer.md** - CLI + libvirt patterns
+- **defect-fixer.md** - Python debugging
+- **doc-writer.md** - Sphinx + Google docstrings
 
-### Platform Support
+## Testing Essentials
 
-> **Platform Support**: OpenCode • GitHub Copilot • Cursor • Windsurf • Aider • Continue.dev
+**Framework**: unittest (NOT pytest - critical!)  
+**Coverage**: 85% enforced (build fails if below)  
+**Mocking**: Mock all `libvirt.*` and `subprocess.*` calls  
+**Pattern**: One `TestCase` class per function/class
 
-All agents work across major AI coding platforms. See [agents/README.md](agents/README.md) for details.
+**Pattern Discovery**: Before writing tests, inspect nearby existing tests and follow their style.
 
-### How to Use
+## Documentation Sources
 
-**OpenCode** (Most efficient):
-```
-@homelab-vm-provisioner-api/homelab-vm-provisioner/agents/test-writer.agent.md Write tests for network.py
-```
+Generated CLI/API docs and source doc comments are the source of truth for detailed command behavior and public function docs.
 
-**GitHub Copilot**:
-```
-@test-writer Write tests for the provisioning module
-```
+Before editing CLI docs or public behavior:
+- Inspect the Python project's docs configuration and existing doc comments.
+- Follow the repo's existing documentation layout.
+- Update source docs/comments rather than only generated output.
+- Run `./scripts/docs-build` to build Sphinx documentation.
+- Do not duplicate full generated documentation in `AGENTS.md`.
 
-**Cursor / Windsurf / Aider**:
-Load the agent file and describe what you need.
+## Common Issues
 
-## Key Gotchas
-
-### Python
-
-- **Virtual environment**: Scripts handle activation automatically
-- **unittest not pytest**: Use `self.assertEqual()` not `assert`
-- **libvirt mocking**: Always mock `libvirt.open()` in tests
-- **Cloud-init templates**: YAML structure must be exact
-- **Connection cleanup**: Always close libvirt connections in finally blocks
-
-### Testing
-
-- **Coverage enforcement**: Build fails if < 85%
-- **Mock everything external**: libvirt, subprocess, file operations
-- **Test class structure**: One TestCase per function/class
-- **Descriptive names**: Use `test_<function>_<scenario>` pattern
-
-### Documentation
-
-- **Google-style docstrings**: Required for all public functions
-- **RST for guides**: Use code-block directives with language
-- **Sphinx autodoc**: Automatically generates API docs from docstrings
-- **Build before commit**: Verify docs build without errors
-
-## Integration with Other Projects
-
-This Python CLI is used by:
-- **homelab-vm-provisioner-api**: Node.js Express API wraps this CLI via subprocess
-- **homelab-vm-provisioner-client**: React frontend calls API which calls this CLI
-
-Communication flow:
-```
-React Client → Express API → Python CLI → libvirt
-```
-
-## Development Workflow
-
-1. **Feature Development**: TDD approach (tests first, then implementation)
-2. **Bug Fixes**: Add regression test, fix bug, verify test passes
-3. **Documentation**: Update docstrings and RST docs before commit
-4. **Coverage**: Always run `./scripts/coverage` before submitting
-5. **Linting**: Run `./scripts/lint` to catch style issues
+- Mutable default arguments (`def func(arg=[]):` is wrong)
+- Broad exception handling
+- Missing input validation
+- libvirt connection leaks
+- Using pytest patterns instead of unittest
