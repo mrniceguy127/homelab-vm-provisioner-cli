@@ -2,7 +2,7 @@
 
 A lightweight KVM/libvirt provisioning tool for creating and managing virtual machines using cloud-init.
 <br>
-[Docs & Test Coverage Reporting](https://mrniceguy127.github.io/homelab-vm-provisioner)
+[Docs & Test Coverage Reporting](https://mrniceguy127.github.io/homelab-vm-provisioner-cli)
 
 ## Features
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "homelab-vm-provisioner"
+name = "homelab-vm-provisioner-cli"
 version = "0.1.0"
 description = "Provision and manage libvirt VMs with cloud-init and YAML configs."
 readme = "README.md"
