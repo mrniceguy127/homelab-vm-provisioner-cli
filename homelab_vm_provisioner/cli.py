@@ -1,4 +1,8 @@
-"""CLI orchestration for VM lifecycle commands."""
+"""CLI orchestration for VM lifecycle commands.
+
+This module provides thin procedural orchestration for CLI commands.
+Business logic is delegated to pure functions (core.py) and services (services.py).
+"""
 
 import argparse
 import ipaddress
@@ -17,6 +21,7 @@ from .config import (
     dns_settings_for_config,
     image_settings_for_config,
     load_config,
+    load_config_from_stdin,
     load_global_config,
     load_vm_state,
     resolve_config_path,
@@ -27,6 +32,12 @@ from .config import (
     vm_data_dir_for_config,
 )
 from .constants import ADMIN_USER
+from .core import (
+    validate_nat_custom_network as core_validate_nat_custom_network,
+)
+from .core import (
+    validate_vm_name_length,
+)
 from .network import discover_vm_network, pick_free_subnet, random_mac, resolve_vm_ipv4
 from .provision import (
     admin_keypair,
@@ -71,10 +82,8 @@ def validate_vm_name(vm_name):
     Raises:
         ValueError: If the VM name is too long.
     """
-    if len(vm_name) <= MAX_VM_NAME_LENGTH:
-        return
-
-    raise ValueError(f"vm.name must be {MAX_VM_NAME_LENGTH} characters or fewer")
+    # Delegate to pure function
+    validate_vm_name_length(vm_name, MAX_VM_NAME_LENGTH)
 
 
 def _validate_nat_custom_network(network):
@@ -86,34 +95,8 @@ def _validate_nat_custom_network(network):
     Raises:
         ValueError: If the CIDR or any related IP address is invalid.
     """
-    cidr_text = network["cidr"]
-    try:
-        cidr = ipaddress.ip_network(cidr_text, strict=True)
-    except ValueError as exc:
-        raise ValueError(f"network.cidr must be a valid IPv4 /24 network: {cidr_text}") from exc
-
-    if cidr.version != 4 or cidr.prefixlen != 24:
-        raise ValueError(f"network.cidr must be a valid IPv4 /24 network: {cidr_text}")
-
-    for field in ("gateway", "vm_ip", "dhcp_start", "dhcp_end"):
-        value = network[field]
-        try:
-            address = ipaddress.ip_address(value)
-        except ValueError as exc:
-            raise ValueError(f"network.{field} must be a valid IPv4 address: {value}") from exc
-
-        if address.version != 4:
-            raise ValueError(f"network.{field} must be a valid IPv4 address: {value}")
-        if address not in cidr:
-            raise ValueError(f"network.{field} must be inside network.cidr {cidr_text}: {value}")
-
-    dhcp_start = ipaddress.ip_address(network["dhcp_start"])
-    dhcp_end = ipaddress.ip_address(network["dhcp_end"])
-    if dhcp_start > dhcp_end:
-        raise ValueError(
-            "network.dhcp_start must not be greater than network.dhcp_end: "
-            f"{dhcp_start} > {dhcp_end}"
-        )
+    # Delegate to pure function from core
+    core_validate_nat_custom_network(network)
 
 
 def build_network_config(vm_name, net_cfg):
@@ -280,17 +263,19 @@ def build_render_context(
     Returns:
         dict: Template context for cloud-init rendering.
     """
-    return {
-        "vm_name": vm_name,
-        "admin_user": ADMIN_USER,
-        "admin_public_key": admin_public_key,
-        "vm_user": vm_user,
-        "vm_public_key": vm_public_key,
-        "vm_sudo": "ALL=(ALL) NOPASSWD:ALL" if allow_sudo else "false",
-        "packages": packages,
-        "dns_resolvers": dns_resolvers,
-        "setup_script_content": setup_script_content,
-    }
+    # Delegate to pure function from core
+    from .core import build_cloud_init_context
+    return build_cloud_init_context(
+        vm_name=vm_name,
+        admin_user=ADMIN_USER,
+        admin_public_key=admin_public_key,
+        vm_user=vm_user,
+        vm_public_key=vm_public_key,
+        allow_sudo=allow_sudo,
+        packages=tuple(packages),
+        dns_resolvers=tuple(dns_resolvers),
+        setup_script_content=setup_script_content,
+    )
 
 
 def print_create_summary(vm_name, vm_user, trust, network, admin_private_key, ports):
@@ -385,11 +370,37 @@ def build_vm_state(vm_name, resolved_config_path, trust, vm_data_dir, network, p
     }
 
 
+# Cache for stdin config to avoid reading stdin multiple times
+_stdin_config_cache = None
+
+
+def load_config_for_path_or_stdin(config_path):
+    """Load config from file path or stdin if config_path is None.
+
+    Args:
+        config_path: Config path, shorthand, or None for stdin.
+
+    Returns:
+        tuple: (config_data dict, resolved_config_path Path or str)
+            For stdin, resolved_config_path is the string "<stdin>".
+    """
+    global _stdin_config_cache
+
+    if config_path is None:
+        if _stdin_config_cache is None:
+            _stdin_config_cache = load_config_from_stdin()
+            if _stdin_config_cache is None:
+                raise ValueError("Config from stdin is empty")
+        return _stdin_config_cache, "<stdin>"
+
+    resolved = resolve_config_path(config_path)
+    return load_config(resolved), resolved
+
+
 def prepare_vm_definition(config_path):
     """Resolve a VM config into the effective provisioning inputs."""
-    resolved_config_path = resolve_config_path(config_path)
+    config_data, resolved_config_path = load_config_for_path_or_stdin(config_path)
     global_config = load_global_config()
-    config_data = load_config(resolved_config_path)
     vm = config_data["vm"]
     net_cfg = config_data.get("network", {})
     packages = config_data.get("packages", [])
@@ -700,72 +711,79 @@ def resolved_config_assets(config_data, global_config):
     return assets
 
 
-def create(config_path):
+def create(config_path=None):
     """Create a VM from a YAML config.
 
     Args:
-        config_path: Config path or shorthand.
+        config_path: Config path or shorthand. If None, reads from stdin.
 
     Raises:
         FileNotFoundError: If the config or tenant SSH key is missing.
-        ValueError: If the config contains invalid values.
+        ValueError: If the config contains invalid values or stdin is empty.
     """
-    require_tools()
+    global _stdin_config_cache
 
-    vm_name = load_config(resolve_config_path(config_path))["vm"]["name"]
-    with host_lifecycle_lock("create", vm_name=vm_name):
-        definition = prepare_vm_definition(config_path)
-        vm_name = definition["vm_name"]
-        if definition["network"].get("network_group_id"):
-            validate_networking_changes(
-                vm_records=planned_managed_vm_records(
-                    vm_name,
-                    build_managed_vm_record(
+    try:
+        require_tools()
+
+        config_data, _ = load_config_for_path_or_stdin(config_path)
+        vm_name = config_data["vm"]["name"]
+        with host_lifecycle_lock("create", vm_name=vm_name):
+            definition = prepare_vm_definition(config_path)
+            vm_name = definition["vm_name"]
+            if definition["network"].get("network_group_id"):
+                validate_networking_changes(
+                    vm_records=planned_managed_vm_records(
                         vm_name,
-                        definition["vm"],
-                        definition["network"],
-                        definition["ports"],
-                        definition["resolved_config_path"],
-                    ),
+                        build_managed_vm_record(
+                            vm_name,
+                            definition["vm"],
+                            definition["network"],
+                            definition["ports"],
+                            definition["resolved_config_path"],
+                        ),
+                    )
                 )
+            save_vm_state(vm_name, definition["state"])
+
+            ensure_host_services()
+            if definition["network"].get("network_group_id"):
+                reconcile_networking()
+            base_img = ensure_base_image(definition["image_settings"])
+            vm_disk = create_vm_disk(vm_name, definition["vm"]["disk_gb"], base_img)
+            network_arg = build_network_arg(vm_name, definition["network"])
+            seed_iso = render_seed_iso_for_definition(definition)
+
+            if definition["network"]["mode"].startswith("nat"):
+                create_nat_network(vm_name, definition["network"])
+
+            virt_install(
+                vm_name,
+                definition["vm"],
+                network_arg,
+                vm_disk,
+                seed_iso,
+                definition["image_settings"]["os_variant"],
             )
-        save_vm_state(vm_name, definition["state"])
 
-        ensure_host_services()
-        if definition["network"].get("network_group_id"):
-            reconcile_networking()
-        base_img = ensure_base_image(definition["image_settings"])
-        vm_disk = create_vm_disk(vm_name, definition["vm"]["disk_gb"], base_img)
-        network_arg = build_network_arg(vm_name, definition["network"])
-        seed_iso = render_seed_iso_for_definition(definition)
-
-        if definition["network"]["mode"].startswith("nat"):
-            create_nat_network(vm_name, definition["network"])
-
-        virt_install(
-            vm_name,
-            definition["vm"],
-            network_arg,
-            vm_disk,
-            seed_iso,
-            definition["image_settings"]["os_variant"],
-        )
-
-        apply_runtime_networking(
-            vm_name,
-            definition["network"],
-            definition["trust"],
-            definition["ports"],
-            definition["state"],
-        )
-        print_create_summary(
-            vm_name,
-            definition["vm_user"],
-            definition["trust"],
-            definition["network"],
-            definition["admin_private_key"],
-            definition["ports"],
-        )
+            apply_runtime_networking(
+                vm_name,
+                definition["network"],
+                definition["trust"],
+                definition["ports"],
+                definition["state"],
+            )
+            print_create_summary(
+                vm_name,
+                definition["vm_user"],
+                definition["trust"],
+                definition["network"],
+                definition["admin_private_key"],
+                definition["ports"],
+            )
+    finally:
+        # Clear stdin cache to support multiple invocations in the same process
+        _stdin_config_cache = None
 
 
 def start(vm_name):
@@ -1023,105 +1041,130 @@ def snapshot_delete(vm_name, snapshot_id):
     print(f"Deleted restore point {snapshot_id} for {vm_name}")
 
 
-def clone(source_vm_name, config_path):
-    """Clone a VM disk into a new VM using a separate saved config."""
-    require_tools(["virsh", "virt-install", "qemu-img", "cloud-localds", "ssh-keygen", "virt-customize"])
+def clone(source_vm_name, config_path=None):
+    """Clone a VM disk into a new VM using a separate saved config.
 
-    target_vm_name = load_config(resolve_config_path(config_path))["vm"]["name"]
-    if target_vm_name == source_vm_name:
-        raise ValueError("Clone target must use a different vm.name than the source VM")
-    if not vm_exists(source_vm_name):
-        raise FileNotFoundError(f"Source VM not found: {source_vm_name}")
-    if vm_exists(target_vm_name):
-        raise RuntimeError(f"Target VM already exists: {target_vm_name}")
+    Args:
+        source_vm_name: Name of the VM to clone from.
+        config_path: Config path or shorthand. If None, reads from stdin.
 
-    source_disk = vm_disk_path(source_vm_name)
-    target_disk = vm_disk_path(target_vm_name)
-    if not source_disk.exists():
-        raise FileNotFoundError(f"Source VM disk was not found: {source_disk}")
-    if target_disk.exists():
-        raise RuntimeError(f"Target VM disk already exists: {target_disk}")
+    Raises:
+        ValueError: If the config is missing required fields for cloning.
+        FileNotFoundError: If the source VM or config doesn't exist.
+    """
+    global _stdin_config_cache
 
-    with host_lifecycle_lock("clone", vm_name=target_vm_name):
-        definition = prepare_vm_definition(config_path)
-        if definition["network"].get("network_group_id"):
-            validate_networking_changes(
-                vm_records=planned_managed_vm_records(
-                    target_vm_name,
-                    build_managed_vm_record(
-                        target_vm_name,
-                        definition["vm"],
-                        definition["network"],
-                        definition["ports"],
-                        definition["resolved_config_path"],
-                    ),
-                )
-            )
-        save_vm_state(target_vm_name, definition["state"])
-        source_state = load_vm_state(source_vm_name)
-        source_config_path = source_state.get("config_path")
-        source_vm_user = None
-        if source_config_path and Path(source_config_path).exists():
-            source_vm_user = load_config(source_config_path).get("vm", {}).get("user")
+    try:
+        require_tools(["virsh", "virt-install", "qemu-img", "cloud-localds", "ssh-keygen", "virt-customize"])
 
-        source_was_running = False
-        try:
-            source_was_running = stop_vm_domain(source_vm_name)
-            ensure_host_services()
+        config_data, _ = load_config_for_path_or_stdin(config_path)
+        
+        # Validate required config fields for cloning
+        if "vm" not in config_data:
+            raise ValueError("Config must contain 'vm' section")
+        if "name" not in config_data["vm"]:
+            raise ValueError("Config 'vm' section must contain 'name' field")
+        if "user" not in config_data["vm"]:
+            raise ValueError("Config 'vm' section must contain 'user' field")
+        
+        target_vm_name = config_data["vm"]["name"]
+        if target_vm_name == source_vm_name:
+            raise ValueError("Clone target must use a different vm.name than the source VM")
+        if not vm_exists(source_vm_name):
+            raise FileNotFoundError(f"Source VM not found: {source_vm_name}")
+        if vm_exists(target_vm_name):
+            raise RuntimeError(f"Target VM already exists: {target_vm_name}")
+
+        source_disk = vm_disk_path(source_vm_name)
+        target_disk = vm_disk_path(target_vm_name)
+        if not source_disk.exists():
+            raise FileNotFoundError(f"Source VM disk was not found: {source_disk}")
+        if target_disk.exists():
+            raise RuntimeError(f"Target VM disk already exists: {target_disk}")
+
+        with host_lifecycle_lock("clone", vm_name=target_vm_name):
+            definition = prepare_vm_definition(config_path)
             if definition["network"].get("network_group_id"):
-                reconcile_networking()
+                validate_networking_changes(
+                    vm_records=planned_managed_vm_records(
+                        target_vm_name,
+                        build_managed_vm_record(
+                            target_vm_name,
+                            definition["vm"],
+                            definition["network"],
+                            definition["ports"],
+                            definition["resolved_config_path"],
+                        ),
+                    )
+                )
+            save_vm_state(target_vm_name, definition["state"])
+            source_state = load_vm_state(source_vm_name)
+            source_config_path = source_state.get("config_path")
+            source_vm_user = None
+            if source_config_path and Path(source_config_path).exists():
+                source_vm_user = load_config(source_config_path).get("vm", {}).get("user")
 
-            copy_qcow2_image(source_disk, target_disk)
-            prepare_cloned_guest_disk(
-                target_disk,
-                target_vm_name,
-                [source_vm_user, definition["vm_user"]],
-            )
+            source_was_running = False
+            try:
+                source_was_running = stop_vm_domain(source_vm_name)
+                ensure_host_services()
+                if definition["network"].get("network_group_id"):
+                    reconcile_networking()
 
-            if definition["network"]["mode"].startswith("nat"):
-                create_nat_network(target_vm_name, definition["network"])
+                copy_qcow2_image(source_disk, target_disk)
+                prepare_cloned_guest_disk(
+                    target_disk,
+                    target_vm_name,
+                    [source_vm_user, definition["vm_user"]],
+                )
 
-            seed_iso = render_seed_iso_for_definition(definition)
-            virt_install(
-                target_vm_name,
-                definition["vm"],
-                build_network_arg(target_vm_name, definition["network"]),
-                target_disk,
-                seed_iso,
-                definition["image_settings"]["os_variant"],
-            )
-            apply_runtime_networking(
-                target_vm_name,
-                definition["network"],
-                definition["trust"],
-                definition["ports"],
-                definition["state"],
-            )
-        except Exception:
-            cleanup_vm_runtime_definition(
-                target_vm_name,
-                merged_vm_network(target_vm_name, definition["state"]),
-                definition["ports"],
-                remove_storage=True,
-            )
-            cleanup_local_vm_artifacts(
-                target_vm_name,
-                admin_private_key=definition["state"].get("admin_private_key"),
-                vm_data_dir=definition["state"].get("vm_data_dir"),
-            )
-            raise
-        finally:
-            if source_was_running:
-                start_vm_domain(source_vm_name)
+                if definition["network"]["mode"].startswith("nat"):
+                    create_nat_network(target_vm_name, definition["network"])
 
-    print_create_summary(
-        target_vm_name,
-        definition["vm_user"],
-        definition["trust"],
-        definition["network"],
-        definition["admin_private_key"],
-        definition["ports"],
-    )
+                seed_iso = render_seed_iso_for_definition(definition)
+                virt_install(
+                    target_vm_name,
+                    definition["vm"],
+                    build_network_arg(target_vm_name, definition["network"]),
+                    target_disk,
+                    seed_iso,
+                    definition["image_settings"]["os_variant"],
+                )
+                apply_runtime_networking(
+                    target_vm_name,
+                    definition["network"],
+                    definition["trust"],
+                    definition["ports"],
+                    definition["state"],
+                )
+            except Exception:
+                cleanup_vm_runtime_definition(
+                    target_vm_name,
+                    merged_vm_network(target_vm_name, definition["state"]),
+                    definition["ports"],
+                    remove_storage=True,
+                )
+                cleanup_local_vm_artifacts(
+                    target_vm_name,
+                    admin_private_key=definition["state"].get("admin_private_key"),
+                    vm_data_dir=definition["state"].get("vm_data_dir"),
+                )
+                raise
+            finally:
+                if source_was_running:
+                    start_vm_domain(source_vm_name)
+
+        print_create_summary(
+            target_vm_name,
+            definition["vm_user"],
+            definition["trust"],
+            definition["network"],
+            definition["admin_private_key"],
+            definition["ports"],
+        )
+    finally:
+        # Clear stdin cache to support multiple invocations in the same process
+        _stdin_config_cache = None
 
 
 def ssh_admin(vm_name, vm_ip=None):
@@ -1217,7 +1260,7 @@ def build_parser():
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     create_parser = subcommands.add_parser("create")
-    create_parser.add_argument("config")
+    create_parser.add_argument("config", nargs="?", default=None, help="Config file path (omit to read from stdin)")
 
     destroy_parser = subcommands.add_parser("destroy")
     destroy_parser.add_argument("name")
@@ -1230,7 +1273,7 @@ def build_parser():
 
     clone_parser = subcommands.add_parser("clone")
     clone_parser.add_argument("source")
-    clone_parser.add_argument("config")
+    clone_parser.add_argument("config", nargs="?", default=None, help="Config file path (omit to read from stdin)")
 
     snapshot_create_parser = subcommands.add_parser("snapshot-create")
     snapshot_create_parser.add_argument("name")

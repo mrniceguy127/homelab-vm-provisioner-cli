@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .constants import DEFAULT_REQUIRED_TOOLS, INSTALL_HINT
 
-LOCK_ROOT = Path(tempfile.gettempdir()) / "homelab-vm-provisioner" / "locks"
+LOCK_ROOT = Path(tempfile.gettempdir()) / "homelab-vm-provisioner-cli" / "locks"
 STANDARD_PATH_ENTRIES = (
     "/usr/local/sbin",
     "/usr/local/bin",

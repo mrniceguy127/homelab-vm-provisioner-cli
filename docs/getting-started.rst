@@ -11,10 +11,53 @@ User Setup
 Common Commands
 ---------------
 
+Create from a file:
+
 .. code-block:: bash
 
    ./vmctl create configs/devbox.yaml
+
+Create from stdin (useful for database-driven configs):
+
+.. code-block:: bash
+
+   cat configs/devbox.yaml | ./vmctl create
+   
+   # Or from heredoc
+   ./vmctl create <<EOF
+   vm:
+     name: demo
+     user: testuser
+     ram_mb: 2048
+     vcpus: 2
+     disk_gb: 20
+   
+   network:
+     mode: nat-auto
+   EOF
+   
+   # Or from database/API
+   python generate_config.py --id=123 | ./vmctl create
+
+Clone a VM:
+
+.. code-block:: bash
+
+   ./vmctl clone source-vm configs/new-vm.yaml
+   
+   # Or from stdin (requires vm.name and vm.user in config)
+   cat configs/new-vm.yaml | ./vmctl clone source-vm
+
+Destroy a VM:
+
+.. code-block:: bash
+
    ./vmctl destroy devbox
+
+SSH as admin:
+
+.. code-block:: bash
+
    ./vmssh-admin devbox
 
 Developer Setup

@@ -1,7 +1,5 @@
 """Helpers for the application-owned managed nftables backend."""
 
-from __future__ import annotations
-
 import os
 import subprocess
 

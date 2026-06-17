@@ -23,3 +23,5 @@ coverage.xml
 coverage-html/
 coverage-report.txt
 docs/_build/
+
+.env

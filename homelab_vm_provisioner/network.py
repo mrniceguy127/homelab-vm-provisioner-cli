@@ -1,24 +1,26 @@
-"""Networking helpers for VM addressing and libvirt network discovery."""
+"""Networking helpers for VM addressing and libvirt network discovery.
+
+This module provides backward-compatible functions that delegate to the new
+functional core (core.py) and adapters (adapters.py). It maintains existing
+API surface for compatibility while using the refactored architecture internally.
+"""
 
 import ipaddress
-import random
 import subprocess
 import xml.etree.ElementTree as ET
 
+from .core import generate_random_mac
 from .system import capture_or_none
 
 
+# Delegate to pure function from core
 def random_mac():
     """Generate a libvirt-friendly random MAC address.
 
     Returns:
         str: Random MAC address in the ``52:54:00:xx:xx:xx`` range.
     """
-    return "52:54:00:%02x:%02x:%02x" % (
-        random.randint(0, 255),
-        random.randint(0, 255),
-        random.randint(0, 255),
-    )
+    return generate_random_mac()
 
 
 def get_existing_routes_text():
@@ -106,6 +108,7 @@ def pick_free_subnet():
     Raises:
         RuntimeError: If no free subnet can be found.
     """
+    # Use existing subnet_appears_used for backward compatibility with tests
     for third_octet in range(100, 251):
         prefix = f"192.168.{third_octet}"
         if subnet_appears_used(prefix + "."):

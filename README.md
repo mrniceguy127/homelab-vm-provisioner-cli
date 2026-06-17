@@ -2,7 +2,7 @@
 
 A lightweight KVM/libvirt provisioning tool for creating and managing virtual machines using cloud-init.
 <br>
-[Docs & Test Coverage Reporting](https://mrniceguy127.github.io/homelab-vm-provisioner)
+[Docs & Test Coverage Reporting](https://mrniceguy127.github.io/homelab-vm-provisioner-cli)
 
 ## Features
 
@@ -17,6 +17,7 @@ A lightweight KVM/libvirt provisioning tool for creating and managing virtual ma
 - Native nftables-managed VM networking policy
 - Port forwarding support
 - YAML-based configuration
+- Stdin/pipe support for database-driven configs
 - Trusted and isolated VM modes
 
 Managed nftables table details and verification guidance live in `../docs/vm-networking-nftables.md`.
@@ -226,9 +227,60 @@ cp configs/template.yaml.example configs/my-vm.yaml
 
 ## Create a VM
 
+### From a file
+
 ```bash
 ./vmctl create configs/devbox.yaml
 ```
+
+### From stdin or pipe
+
+Both `create` and `clone` support reading configs from stdin when the config path is omitted:
+
+```bash
+# From pipe
+cat configs/devbox.yaml | ./vmctl create
+
+# From heredoc
+./vmctl create <<EOF
+vm:
+  name: demo
+  user: testuser
+  ram_mb: 2048
+  vcpus: 2
+  disk_gb: 20
+
+network:
+  mode: nat-auto
+EOF
+
+# From database or API (enables memory-based configs)
+python generate_config_from_db.py --id=123 | ./vmctl create
+```
+
+This is particularly useful for:
+- Database-driven VM provisioning
+- API-driven workflows
+- Dynamic config generation
+- CI/CD pipelines without temporary files
+
+## Clone a VM
+
+```bash
+./vmctl clone source-vm configs/new-vm.yaml
+```
+
+Clone also supports stdin:
+
+```bash
+# From pipe
+cat configs/new-vm.yaml | ./vmctl clone source-vm
+
+# From database
+python generate_config_from_db.py --id=456 | ./vmctl clone template-vm
+```
+
+**Note:** When using stdin with `clone`, the config must include `vm.name` and `vm.user` fields. These are validated before cloning begins.
 
 ## Destroy a VM
 

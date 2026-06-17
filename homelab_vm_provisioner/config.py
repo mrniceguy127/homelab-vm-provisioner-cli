@@ -49,6 +49,24 @@ def load_config(path):
         return yaml.safe_load(file_obj)
 
 
+def load_config_from_stdin():
+    """Load a YAML configuration from stdin.
+
+    This function enables config piping and memory-based configurations
+    without requiring temporary files.
+
+    Returns:
+        dict: Parsed YAML document, or None if stdin is empty.
+
+    Raises:
+        yaml.YAMLError: If the input is not valid YAML.
+    """
+    import sys
+
+    content = sys.stdin.read()
+    return yaml.safe_load(content)
+
+
 def load_global_config():
     """Load the project-level configuration file when present.
 

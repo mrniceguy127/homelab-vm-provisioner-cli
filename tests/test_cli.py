@@ -111,7 +111,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
 
     def test_raises_for_nat_custom_address_outside_cidr(self):
         with patch.object(cli, "random_mac", return_value="52:54:00:aa:bb:cc"):
-            with self.assertRaisesRegex(ValueError, "network.gateway must be inside network.cidr"):
+            with self.assertRaisesRegex(ValueError, "network.gateway must be inside network"):
                 cli.build_network_config(
                     "demo",
                     {
@@ -125,7 +125,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
                 )
 
     def test_raises_for_invalid_nat_custom_cidr(self):
-        with self.assertRaisesRegex(ValueError, "network.cidr"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 network"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "not-a-network",
@@ -137,7 +137,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
             )
 
     def test_raises_for_nat_custom_non_slash_24_cidr(self):
-        with self.assertRaisesRegex(ValueError, "network.cidr"):
+        with self.assertRaisesRegex(ValueError, "/24 network"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "192.168.240.0/25",
@@ -149,7 +149,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
             )
 
     def test_raises_for_invalid_nat_custom_ipv4_address(self):
-        with self.assertRaisesRegex(ValueError, "network.gateway"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 address"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "192.168.240.0/24",
@@ -161,7 +161,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
             )
 
     def test_raises_for_nat_custom_ipv6_address(self):
-        with self.assertRaisesRegex(ValueError, "network.gateway"):
+        with self.assertRaisesRegex(ValueError, "Must be an IPv4 address"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "192.168.240.0/24",
@@ -292,6 +292,21 @@ class ParserAndMainTests(unittest.TestCase):
         create_mock.assert_not_called()
         destroy_mock.assert_not_called()
         ssh_admin_mock.assert_not_called()
+
+    def test_build_parser_accepts_no_config_for_stdin(self):
+        """Test that the parser accepts omitted config argument for stdin."""
+        parser = cli.build_parser()
+        args = parser.parse_args(["create"])
+
+        self.assertEqual(args.command, "create")
+        self.assertIsNone(args.config)
+
+    def test_main_dispatches_create_without_config_for_stdin(self):
+        """Test that main() dispatches create with None when no config provided."""
+        with patch.object(cli, "create") as create_mock:
+            cli.main(["create"])
+
+        create_mock.assert_called_once_with(None)
 
 
 class CreateTests(unittest.TestCase):
@@ -470,7 +485,7 @@ class CreateTests(unittest.TestCase):
                 "vm_user": "tenant",
                 "vm_public_key": "ssh-ed25519 AAA tenant",
                 "vm_sudo": "false",
-                "packages": ["htop"],
+                "packages": ("htop",),
                 "dns_resolvers": ("1.1.1.1", "1.0.0.1"),
                 "setup_script_content": None,
             },
@@ -842,6 +857,185 @@ class CreateTests(unittest.TestCase):
 
         validate_mock.assert_called_once()
         save_state_mock.assert_not_called()
+
+    def test_create_with_stdin_config(self):
+        """Test that create command can accept config via stdin when no config argument provided."""
+        with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:
+            tmpdir_path = Path(tmpdir)
+            tenant_key = tmpdir_path / "tenant.pub"
+            tenant_key.write_text("ssh-ed25519 AAA tenant\n", encoding="utf-8")
+
+            config_data = {
+                "vm": {
+                    "name": "demo-stdin",
+                    "user": "tenant",
+                    "ssh_key_file": tenant_key.as_posix(),
+                    "ram_mb": 4096,
+                    "vcpus": 2,
+                    "disk_gb": 40,
+                    "allow_sudo": False,
+                    "trust": "untrusted",
+                    "template": "base",
+                },
+                "network": {
+                    "mode": "nat-auto",
+                },
+                "packages": ["htop"],
+                "ports": [{"host": 2222, "guest": 22}],
+            }
+
+            vm_data_dir = tmpdir_path / "vm" / "data" / "demo-stdin"
+            admin_key_dir = tmpdir_path / "vm" / "keys" / "admin"
+            admin_key = admin_key_dir / "demo-stdin_admin_ed25519"
+            global_config = {
+                "paths": {
+                    "vm_data_dir": "vm/data",
+                    "admin_key_dir": "vm/keys/admin",
+                    "user_key_dir": "vm/keys/users",
+                    "vm_state_dir": "vm/state",
+                }
+            }
+            image_settings = {
+                "name": "ubuntu-24.04.img",
+                "url": "https://example.invalid/images/ubuntu-24.04.img",
+                "os_variant": "ubuntu24.04",
+            }
+            dns_settings = {"resolvers": ("1.1.1.1", "1.0.0.1")}
+
+            stack.enter_context(patch.object(cli, "require_tools"))
+            stack.enter_context(patch.object(cli, "load_global_config", return_value=global_config))
+            load_stdin_mock = stack.enter_context(patch.object(cli, "load_config_from_stdin", return_value=config_data))
+            stack.enter_context(patch.object(cli, "vm_data_dir_for_config", return_value=vm_data_dir))
+            stack.enter_context(patch.object(cli, "default_admin_key_dir", return_value=admin_key_dir))
+            stack.enter_context(patch.object(cli, "admin_keypair", return_value=(admin_key, "ssh-ed25519 AAA admin")))
+            stack.enter_context(patch.object(cli, "random_mac", return_value="52:54:00:aa:bb:cc"))
+            stack.enter_context(patch.object(cli, "run"))
+            stack.enter_context(patch.object(cli, "image_settings_for_config", return_value=image_settings))
+            stack.enter_context(patch.object(cli, "dns_settings_for_config", return_value=dns_settings))
+            stack.enter_context(patch.object(cli, "validate_os_variant"))
+            stack.enter_context(patch.object(cli, "ensure_base_image", return_value=Path("/images/ubuntu-24.04.img")))
+            stack.enter_context(patch.object(cli, "create_vm_disk", return_value=Path("/images/demo-stdin.qcow2")))
+            stack.enter_context(patch.object(cli, "create_nat_network"))
+            stack.enter_context(patch.object(cli, "render_templates", return_value=(Path("/build/user-data"), Path("/build/meta-data"))))
+            stack.enter_context(patch.object(cli, "save_vm_state"))
+            stack.enter_context(patch.object(cli, "create_seed_iso", return_value=Path("/images/demo-stdin-seed.iso")))
+            virt_install_mock = stack.enter_context(patch.object(cli, "virt_install"))
+            stack.enter_context(patch.object(cli, "reconcile_networking"))
+            stack.enter_context(patch.object(cli, "pick_free_subnet", return_value={
+                "prefix": "192.168.120",
+                "cidr": "192.168.120.0/24",
+                "gateway": "192.168.120.1",
+                "vm_ip": "192.168.120.50",
+                "dhcp_start": "192.168.120.50",
+                "dhcp_end": "192.168.120.99",
+            }))
+            
+            cli.create(None)
+
+            # Verify stdin was read
+            load_stdin_mock.assert_called_once()
+            # Verify VM was created
+            virt_install_mock.assert_called_once()
+            self.assertEqual(virt_install_mock.call_args[0][0], "demo-stdin")
+
+
+class CloneWithStdinTests(unittest.TestCase):
+    def test_clone_with_stdin_config(self):
+        """Test that clone command can accept config via stdin when no config argument provided."""
+        with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:
+            tmpdir_path = Path(tmpdir)
+            tenant_key = tmpdir_path / "tenant.pub"
+            tenant_key.write_text("ssh-ed25519 AAA tenant\n", encoding="utf-8")
+
+            config_data = {
+                "vm": {
+                    "name": "demo-clone",
+                    "user": "tenant",
+                    "ssh_key_file": tenant_key.as_posix(),
+                    "ram_mb": 2048,
+                    "vcpus": 1,
+                    "disk_gb": 20,
+                    "allow_sudo": False,
+                    "trust": "untrusted",
+                    "template": "base",
+                },
+                "network": {
+                    "mode": "nat-auto",
+                },
+                "packages": ["vim"],
+            }
+
+            stack.enter_context(patch.object(cli, "require_tools"))
+            load_stdin_mock = stack.enter_context(patch.object(cli, "load_config_from_stdin", return_value=config_data))
+            stack.enter_context(patch.object(cli, "vm_exists", side_effect=[True, False, False]))
+            stack.enter_context(patch.object(cli, "vm_disk_path", side_effect=[Path("/disk/source.qcow2"), Path("/disk/target.qcow2")]))
+            stack.enter_context(patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(cli, "prepare_vm_definition", return_value={
+                "vm_name": "demo-clone",
+                "vm_user": "tenant",
+                "trust": "untrusted",
+                "network": {
+                    "mode": "nat-auto",
+                    "name": "demo-clone-net",
+                    "mac": "52:54:00:aa:bb:cc",
+                    "vm_ip": "192.168.120.50",
+                },
+                "ports": [],
+                "resolved_config_path": "<stdin>",
+                "state": {"vm_name": "demo-clone"},
+                "vm": config_data["vm"],
+                "image_settings": {"os_variant": "ubuntu24.04"},
+                "admin_private_key": Path("/keys/admin"),
+            }))
+            stack.enter_context(patch.object(cli, "save_vm_state"))
+            stack.enter_context(patch.object(cli, "load_vm_state", return_value={"config_path": "/configs/source.yaml"}))
+            stack.enter_context(patch.object(cli, "load_config", return_value={"vm": {"user": "olduser"}}))
+            stack.enter_context(patch.object(cli, "stop_vm_domain", return_value=False))
+            stack.enter_context(patch.object(cli, "ensure_host_services"))
+            stack.enter_context(patch.object(cli, "copy_qcow2_image"))
+            stack.enter_context(patch.object(cli, "prepare_cloned_guest_disk"))
+            stack.enter_context(patch.object(cli, "create_nat_network"))
+            stack.enter_context(patch.object(cli, "render_seed_iso_for_definition", return_value=Path("/seed.iso")))
+            stack.enter_context(patch.object(cli, "virt_install"))
+            stack.enter_context(patch.object(cli, "reconcile_networking"))
+            stack.enter_context(patch.object(cli, "pick_free_subnet", return_value={}))
+            stack.enter_context(patch("builtins.print"))
+            stack.enter_context(patch.object(Path, "exists", lambda p: str(p) == "/disk/source.qcow2"))
+            
+            cli.clone("source-vm", None)
+
+            # Verify stdin was read
+            load_stdin_mock.assert_called_once()
+
+    def test_clone_validates_required_vm_section(self):
+        """Test that clone raises error if config is missing 'vm' section."""
+        config_data = {"network": {"mode": "nat-auto"}}
+
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_config_from_stdin", return_value=config_data
+        ):
+            with self.assertRaisesRegex(ValueError, "Config must contain 'vm' section"):
+                cli.clone("source-vm", None)
+
+    def test_clone_validates_required_name_field(self):
+        """Test that clone raises error if config is missing 'vm.name' field."""
+        config_data = {"vm": {"user": "tenant"}}
+
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_config_from_stdin", return_value=config_data
+        ):
+            with self.assertRaisesRegex(ValueError, "Config 'vm' section must contain 'name' field"):
+                cli.clone("source-vm", None)
+
+    def test_clone_validates_required_user_field(self):
+        """Test that clone raises error if config is missing 'vm.user' field."""
+        config_data = {"vm": {"name": "demo"}}
+
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_config_from_stdin", return_value=config_data
+        ):
+            with self.assertRaisesRegex(ValueError, "Config 'vm' section must contain 'user' field"):
+                cli.clone("source-vm", None)
 
 
 class SnapshotRestoreTests(unittest.TestCase):
@@ -1307,74 +1501,96 @@ class StopTests(unittest.TestCase):
 
 
 class SnapshotCreateTests(unittest.TestCase):
+    def _setup_snapshot_test_fixtures(self, tmpdir_path):
+        """Setup test fixtures for snapshot tests."""
+        config_path = tmpdir_path / "configs" / "demo.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
+        
+        state_path = tmpdir_path / "state" / "demo.yaml"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text("vm_name: demo\n", encoding="utf-8")
+        
+        vm_data_dir = tmpdir_path / "vm-data" / "demo"
+        vm_data_dir.mkdir(parents=True)
+        (vm_data_dir / "user-data").write_text("cloud-init", encoding="utf-8")
+        
+        admin_key = tmpdir_path / "keys" / "demo_admin_ed25519"
+        admin_key.parent.mkdir(parents=True)
+        admin_key.write_text("private", encoding="utf-8")
+        (tmpdir_path / "keys" / "demo_admin_ed25519.pub").write_text("public", encoding="utf-8")
+        
+        disk_path = tmpdir_path / "images" / "demo.qcow2"
+        disk_path.parent.mkdir(parents=True)
+        disk_path.write_text("disk", encoding="utf-8")
+        
+        seed_path = tmpdir_path / "images" / "demo-seed.iso"
+        seed_path.write_text("seed", encoding="utf-8")
+        
+        snapshot_path = tmpdir_path / "snapshots" / "snap-abc123" / "demo"
+        
+        state = {
+            "config_path": str(config_path),
+            "vm_data_dir": str(vm_data_dir),
+            "admin_private_key": str(admin_key),
+        }
+        
+        return {
+            "config_path": config_path,
+            "state_path": state_path,
+            "vm_data_dir": vm_data_dir,
+            "disk_path": disk_path,
+            "seed_path": seed_path,
+            "snapshot_path": snapshot_path,
+            "state": state,
+        }
+
+    def _setup_snapshot_mocks(self, stack, fixtures):
+        """Setup mocks for snapshot tests."""
+        stack.enter_context(patch.object(cli, "require_tools"))
+        stack.enter_context(patch.object(cli, "load_vm_state", return_value=fixtures["state"]))
+        stack.enter_context(patch.object(cli, "resolve_config_path", return_value=fixtures["config_path"]))
+        stack.enter_context(patch.object(cli, "load_config", return_value={"vm": {"name": "demo"}}))
+        stack.enter_context(patch.object(cli, "load_global_config", return_value={}))
+        stack.enter_context(patch.object(cli, "current_snapshot_id", return_value="snap-abc123"))
+        stack.enter_context(patch.object(cli, "snapshot_path_for_vm", return_value=fixtures["snapshot_path"]))
+        stack.enter_context(patch.object(cli, "vm_disk_path", return_value=fixtures["disk_path"]))
+        stack.enter_context(patch.object(cli, "seed_iso_path", return_value=fixtures["seed_path"]))
+        stack.enter_context(patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()))
+        stop_mock = stack.enter_context(patch.object(cli, "stop_vm_domain", return_value=True))
+        stack.enter_context(patch.object(cli, "vm_exists", return_value=True))
+        start_mock = stack.enter_context(patch.object(cli, "start_vm_domain"))
+        copy_qcow2_mock = stack.enter_context(patch.object(cli, "copy_qcow2_image"))
+        copy_artifact_mock = stack.enter_context(patch.object(cli, "copy_image_artifact"))
+        copy_file_mock = stack.enter_context(patch.object(cli, "copy_local_file"))
+        copy_tree_mock = stack.enter_context(patch.object(cli, "copy_local_tree"))
+        stack.enter_context(patch.object(cli, "state_file_for_vm", return_value=fixtures["state_path"]))
+        stack.enter_context(patch.object(cli, "vm_data_dir_for_config", return_value=fixtures["vm_data_dir"]))
+        stack.enter_context(patch.object(cli, "resolved_config_assets", return_value={}))
+        stack.enter_context(patch.object(cli, "chown_path_to_current_user"))
+        
+        return {
+            "stop_mock": stop_mock,
+            "start_mock": start_mock,
+            "copy_qcow2_mock": copy_qcow2_mock,
+            "copy_artifact_mock": copy_artifact_mock,
+            "copy_file_mock": copy_file_mock,
+            "copy_tree_mock": copy_tree_mock,
+        }
+
     def test_snapshot_create_copies_all_vm_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:
-            tmpdir_path = Path(tmpdir)
-            config_path = tmpdir_path / "configs" / "demo.yaml"
-            config_path.parent.mkdir(parents=True)
-            config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
-            
-            state_path = tmpdir_path / "state" / "demo.yaml"
-            state_path.parent.mkdir(parents=True)
-            state_path.write_text("vm_name: demo\n", encoding="utf-8")
-            
-            vm_data_dir = tmpdir_path / "vm-data" / "demo"
-            vm_data_dir.mkdir(parents=True)
-            (vm_data_dir / "user-data").write_text("cloud-init", encoding="utf-8")
-            
-            admin_key = tmpdir_path / "keys" / "demo_admin_ed25519"
-            admin_key.parent.mkdir(parents=True)
-            admin_key.write_text("private", encoding="utf-8")
-            (tmpdir_path / "keys" / "demo_admin_ed25519.pub").write_text("public", encoding="utf-8")
-            
-            disk_path = tmpdir_path / "images" / "demo.qcow2"
-            disk_path.parent.mkdir(parents=True)
-            disk_path.write_text("disk", encoding="utf-8")
-            
-            seed_path = tmpdir_path / "images" / "demo-seed.iso"
-            seed_path.write_text("seed", encoding="utf-8")
-            
-            snapshot_path = tmpdir_path / "snapshots" / "snap-abc123" / "demo"
-            
-            state = {
-                "config_path": str(config_path),
-                "vm_data_dir": str(vm_data_dir),
-                "admin_private_key": str(admin_key),
-            }
-            
-            config_data = {"vm": {"name": "demo"}}
-            global_config = {}
-            
-            stack.enter_context(patch.object(cli, "require_tools"))
-            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
-            stack.enter_context(patch.object(cli, "resolve_config_path", return_value=config_path))
-            stack.enter_context(patch.object(cli, "load_config", return_value=config_data))
-            stack.enter_context(patch.object(cli, "load_global_config", return_value=global_config))
-            stack.enter_context(patch.object(cli, "current_snapshot_id", return_value="snap-abc123"))
-            stack.enter_context(patch.object(cli, "snapshot_path_for_vm", return_value=snapshot_path))
-            stack.enter_context(patch.object(cli, "vm_disk_path", return_value=disk_path))
-            stack.enter_context(patch.object(cli, "seed_iso_path", return_value=seed_path))
-            stack.enter_context(patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()))
-            stop_mock = stack.enter_context(patch.object(cli, "stop_vm_domain", return_value=True))
-            stack.enter_context(patch.object(cli, "vm_exists", return_value=True))
-            start_mock = stack.enter_context(patch.object(cli, "start_vm_domain"))
-            copy_qcow2_mock = stack.enter_context(patch.object(cli, "copy_qcow2_image"))
-            copy_artifact_mock = stack.enter_context(patch.object(cli, "copy_image_artifact"))
-            copy_file_mock = stack.enter_context(patch.object(cli, "copy_local_file"))
-            copy_tree_mock = stack.enter_context(patch.object(cli, "copy_local_tree"))
-            stack.enter_context(patch.object(cli, "state_file_for_vm", return_value=state_path))
-            stack.enter_context(patch.object(cli, "vm_data_dir_for_config", return_value=vm_data_dir))
-            stack.enter_context(patch.object(cli, "resolved_config_assets", return_value={}))
-            stack.enter_context(patch.object(cli, "chown_path_to_current_user"))
+            fixtures = self._setup_snapshot_test_fixtures(Path(tmpdir))
+            mocks = self._setup_snapshot_mocks(stack, fixtures)
             
             cli.snapshot_create("demo")
             
-            stop_mock.assert_called_once_with("demo")
-            start_mock.assert_called_once_with("demo")
-            copy_qcow2_mock.assert_called_once()
-            self.assertTrue(copy_artifact_mock.called)
-            self.assertTrue(copy_file_mock.called)
-            copy_tree_mock.assert_called_once()
+            mocks["stop_mock"].assert_called_once_with("demo")
+            mocks["start_mock"].assert_called_once_with("demo")
+            mocks["copy_qcow2_mock"].assert_called_once()
+            self.assertTrue(mocks["copy_artifact_mock"].called)
+            self.assertTrue(mocks["copy_file_mock"].called)
+            mocks["copy_tree_mock"].assert_called_once()
 
     def test_snapshot_create_cleans_up_on_error(self):
         with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:
@@ -1820,13 +2036,13 @@ class ValidateNatCustomNetworkTests(unittest.TestCase):
     def test_validates_invalid_cidr(self):
         network = {"cidr": "invalid"}
         
-        with self.assertRaisesRegex(ValueError, "must be a valid IPv4 /24 network"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 network"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_non_24_prefix(self):
-        network = {"cidr": "192.168.1.0/16"}
+        network = {"cidr": "192.0.0.0/16"}
         
-        with self.assertRaisesRegex(ValueError, "must be a valid IPv4 /24 network"):
+        with self.assertRaisesRegex(ValueError, "/24 network"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_invalid_gateway(self):
@@ -1838,7 +2054,7 @@ class ValidateNatCustomNetworkTests(unittest.TestCase):
             "dhcp_end": "192.168.1.99",
         }
         
-        with self.assertRaisesRegex(ValueError, "gateway must be a valid IPv4 address"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 address"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_gateway_outside_cidr(self):
@@ -1850,7 +2066,7 @@ class ValidateNatCustomNetworkTests(unittest.TestCase):
             "dhcp_end": "192.168.1.99",
         }
         
-        with self.assertRaisesRegex(ValueError, "gateway must be inside network.cidr"):
+        with self.assertRaisesRegex(ValueError, "network.gateway must be inside network"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_dhcp_start_greater_than_end(self):
