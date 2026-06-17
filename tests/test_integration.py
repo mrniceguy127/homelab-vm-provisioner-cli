@@ -94,7 +94,18 @@ class FakeHost:
 
         return completed_process()
 
-    def subprocess_run(self, cmd, stdout=None, stderr=None, text=None, check=None):
+    def subprocess_run(self, cmd, stdout=None, stderr=None, text=None, check=None, input=None):
+        # Handle ssh-keygen for the new adapter-based code path
+        if cmd and cmd[0] == "ssh-keygen":
+            key_path = Path(cmd[cmd.index("-f") + 1])
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            key_path.write_text("private", encoding="utf-8")
+            Path(str(key_path) + ".pub").write_text(
+                f"ssh-ed25519 AAA {key_path.stem}\n",
+                encoding="utf-8",
+            )
+            return completed_process(returncode=0)
+        
         if cmd[:3] == ["sudo", "virsh", "dominfo"]:
             return completed_process(returncode=0 if cmd[3] in self.vm_names else 1)
 

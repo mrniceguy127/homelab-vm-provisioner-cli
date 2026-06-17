@@ -1,9 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 from homelab_vm_provisioner import provision
+from homelab_vm_provisioner.adapters import SubprocessAdapter
 
 
 class AdminKeypairTests(unittest.TestCase):
@@ -18,8 +19,10 @@ class AdminKeypairTests(unittest.TestCase):
                     "ssh-ed25519 AAA admin-demo\n",
                     encoding="utf-8",
                 )
+                return MagicMock(returncode=0)
 
-            with patch.object(provision, "run", side_effect=fake_run) as run_mock:
+            # Mock at the adapter level since admin_keypair now uses adapters
+            with patch.object(SubprocessAdapter, "run", side_effect=fake_run) as run_mock:
                 key_path, public_key = provision.admin_keypair(
                     "demo", admin_key_dir=admin_dir
                 )
@@ -44,7 +47,8 @@ class AdminKeypairTests(unittest.TestCase):
             key_path.write_text("private", encoding="utf-8")
             pub_path.write_text("ssh-ed25519 AAA existing\n", encoding="utf-8")
 
-            with patch.object(provision, "run") as run_mock:
+            # Mock at adapter level - should not be called since key exists
+            with patch.object(SubprocessAdapter, "run") as run_mock:
                 returned_key_path, public_key = provision.admin_keypair(
                     "demo", admin_key_dir=admin_dir
                 )
@@ -52,6 +56,41 @@ class AdminKeypairTests(unittest.TestCase):
         self.assertEqual(returned_key_path, key_path)
         self.assertEqual(public_key, "ssh-ed25519 AAA existing")
         run_mock.assert_not_called()
+
+    def test_fails_fast_when_private_key_not_created(self):
+        """Verify that ensure_keypair fails immediately if ssh-keygen doesn't create the private key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            admin_dir = Path(tmpdir)
+
+            def broken_run(cmd, sudo=False, check=True):
+                # ssh-keygen command runs but doesn't create the private key file
+                key_path = Path(cmd[cmd.index("-f") + 1])
+                # Only create the public key (simulating a broken ssh-keygen)
+                Path(str(key_path) + ".pub").write_text(
+                    "ssh-ed25519 AAA admin-demo\n",
+                    encoding="utf-8",
+                )
+                return MagicMock(returncode=0)
+
+            with patch.object(SubprocessAdapter, "run", side_effect=broken_run):
+                with self.assertRaisesRegex(FileNotFoundError, "failed to create private key"):
+                    provision.admin_keypair("demo", admin_key_dir=admin_dir)
+
+    def test_fails_fast_when_public_key_not_created(self):
+        """Verify that ensure_keypair fails immediately if ssh-keygen doesn't create the public key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            admin_dir = Path(tmpdir)
+
+            def broken_run(cmd, sudo=False, check=True):
+                # ssh-keygen command runs but doesn't create the public key file
+                key_path = Path(cmd[cmd.index("-f") + 1])
+                # Only create the private key (simulating a broken ssh-keygen)
+                key_path.write_text("private", encoding="utf-8")
+                return MagicMock(returncode=0)
+
+            with patch.object(SubprocessAdapter, "run", side_effect=broken_run):
+                with self.assertRaisesRegex(FileNotFoundError, "failed to create public key"):
+                    provision.admin_keypair("demo", admin_key_dir=admin_dir)
 
 
 class TemplateRenderTests(unittest.TestCase):

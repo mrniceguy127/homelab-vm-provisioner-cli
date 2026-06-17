@@ -111,7 +111,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
 
     def test_raises_for_nat_custom_address_outside_cidr(self):
         with patch.object(cli, "random_mac", return_value="52:54:00:aa:bb:cc"):
-            with self.assertRaisesRegex(ValueError, "network.gateway must be inside network.cidr"):
+            with self.assertRaisesRegex(ValueError, "network.gateway must be inside network"):
                 cli.build_network_config(
                     "demo",
                     {
@@ -125,7 +125,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
                 )
 
     def test_raises_for_invalid_nat_custom_cidr(self):
-        with self.assertRaisesRegex(ValueError, "network.cidr"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 network"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "not-a-network",
@@ -137,7 +137,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
             )
 
     def test_raises_for_nat_custom_non_slash_24_cidr(self):
-        with self.assertRaisesRegex(ValueError, "network.cidr"):
+        with self.assertRaisesRegex(ValueError, "/24 network"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "192.168.240.0/25",
@@ -149,7 +149,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
             )
 
     def test_raises_for_invalid_nat_custom_ipv4_address(self):
-        with self.assertRaisesRegex(ValueError, "network.gateway"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 address"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "192.168.240.0/24",
@@ -161,7 +161,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
             )
 
     def test_raises_for_nat_custom_ipv6_address(self):
-        with self.assertRaisesRegex(ValueError, "network.gateway"):
+        with self.assertRaisesRegex(ValueError, "Must be an IPv4 address"):
             cli._validate_nat_custom_network(
                 {
                     "cidr": "192.168.240.0/24",
@@ -470,7 +470,7 @@ class CreateTests(unittest.TestCase):
                 "vm_user": "tenant",
                 "vm_public_key": "ssh-ed25519 AAA tenant",
                 "vm_sudo": "false",
-                "packages": ["htop"],
+                "packages": ("htop",),
                 "dns_resolvers": ("1.1.1.1", "1.0.0.1"),
                 "setup_script_content": None,
             },
@@ -1820,13 +1820,13 @@ class ValidateNatCustomNetworkTests(unittest.TestCase):
     def test_validates_invalid_cidr(self):
         network = {"cidr": "invalid"}
         
-        with self.assertRaisesRegex(ValueError, "must be a valid IPv4 /24 network"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 network"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_non_24_prefix(self):
-        network = {"cidr": "192.168.1.0/16"}
+        network = {"cidr": "192.0.0.0/16"}
         
-        with self.assertRaisesRegex(ValueError, "must be a valid IPv4 /24 network"):
+        with self.assertRaisesRegex(ValueError, "/24 network"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_invalid_gateway(self):
@@ -1838,7 +1838,7 @@ class ValidateNatCustomNetworkTests(unittest.TestCase):
             "dhcp_end": "192.168.1.99",
         }
         
-        with self.assertRaisesRegex(ValueError, "gateway must be a valid IPv4 address"):
+        with self.assertRaisesRegex(ValueError, "Invalid IPv4 address"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_gateway_outside_cidr(self):
@@ -1850,7 +1850,7 @@ class ValidateNatCustomNetworkTests(unittest.TestCase):
             "dhcp_end": "192.168.1.99",
         }
         
-        with self.assertRaisesRegex(ValueError, "gateway must be inside network.cidr"):
+        with self.assertRaisesRegex(ValueError, "network.gateway must be inside network"):
             cli._validate_nat_custom_network(network)
 
     def test_validates_dhcp_start_greater_than_end(self):

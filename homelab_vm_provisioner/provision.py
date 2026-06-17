@@ -1,18 +1,23 @@
-"""Provisioning helpers for libvirt resources and local artifacts."""
+"""Provisioning helpers for libvirt resources and local artifacts.
 
-import hashlib
+This module provides backward-compatible functions that delegate to the new
+service layer (services.py) and pure functions (core.py). It maintains existing
+API surface for compatibility while using the refactored architecture internally.
+"""
+
 import shutil
 import subprocess
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader
-
+from .adapters import FileSystemAdapter, SSHKeyGenerator, SubprocessAdapter
 from .config import default_admin_key_dir, default_vm_data_dir, delete_vm_state
 from .constants import (
     ADMIN_USER,
     IMG_DIR,
     TEMPLATES_DIR,
 )
+from .core import compute_bridge_name, compute_legacy_bridge_name
+from .services import TemplateService
 from .system import run
 
 
@@ -25,8 +30,7 @@ def default_nat_bridge_name(vm_name):
     Returns:
         str: Stable bridge name within Linux interface length limits.
     """
-    suffix = hashlib.sha1(vm_name.encode("utf-8")).hexdigest()[:8]
-    return f"virbr-{suffix}"
+    return compute_bridge_name(vm_name)
 
 
 def legacy_nat_bridge_name(vm_name):
@@ -38,7 +42,7 @@ def legacy_nat_bridge_name(vm_name):
     Returns:
         str: Older bridge naming scheme based on a truncated VM name.
     """
-    return f"virbr-{vm_name[:6]}"
+    return compute_legacy_bridge_name(vm_name)
 
 
 def admin_private_key_path(vm_name, admin_key_dir=None):
@@ -65,29 +69,15 @@ def admin_keypair(vm_name, admin_key_dir=None):
     Returns:
         tuple[Path, str]: Private key path and public key contents.
     """
+    # Delegate to service layer using adapters
     key_dir = Path(admin_key_dir) if admin_key_dir is not None else default_admin_key_dir()
-    key_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-
+    
+    subprocess_adapter = SubprocessAdapter()
+    fs_adapter = FileSystemAdapter()
+    key_generator = SSHKeyGenerator(subprocess_adapter, fs_adapter)
+    
     key_path = admin_private_key_path(vm_name, admin_key_dir=key_dir)
-    pub_path = Path(str(key_path) + ".pub")
-    if not key_path.exists():
-        run(
-            [
-                "ssh-keygen",
-                "-t",
-                "ed25519",
-                "-f",
-                str(key_path),
-                "-N",
-                "",
-                "-C",
-                f"admin-{vm_name}",
-            ]
-        )
-
-    key_path.chmod(0o600)
-    pub_path.chmod(0o644)
-    return key_path, pub_path.read_text(encoding="utf-8").strip()
+    return key_generator.ensure_keypair(key_path, f"admin-{vm_name}")
 
 
 def render_templates(context, template_name, vm_data_dir):
@@ -101,18 +91,10 @@ def render_templates(context, template_name, vm_data_dir):
     Returns:
         tuple[Path, Path]: Rendered ``user-data`` and ``meta-data`` file paths.
     """
-    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
-    user_data = env.get_template(f"{template_name}-user-data.yaml.j2").render(**context)
-    meta_data = env.get_template("meta-data.yaml.j2").render(**context)
-
-    vm_data_dir = Path(vm_data_dir)
-    vm_data_dir.mkdir(parents=True, exist_ok=True)
-
-    user_data_path = vm_data_dir / "user-data"
-    meta_data_path = vm_data_dir / "meta-data"
-    user_data_path.write_text(user_data, encoding="utf-8")
-    meta_data_path.write_text(meta_data, encoding="utf-8")
-    return user_data_path, meta_data_path
+    # Delegate to service layer
+    fs_adapter = FileSystemAdapter()
+    template_service = TemplateService(TEMPLATES_DIR, fs_adapter)
+    return template_service.render_cloud_init(context, template_name, Path(vm_data_dir))
 
 
 def ensure_base_image(image_settings):

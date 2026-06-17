@@ -1,4 +1,8 @@
-"""CLI orchestration for VM lifecycle commands."""
+"""CLI orchestration for VM lifecycle commands.
+
+This module provides thin procedural orchestration for CLI commands.
+Business logic is delegated to pure functions (core.py) and services (services.py).
+"""
 
 import argparse
 import ipaddress
@@ -27,6 +31,12 @@ from .config import (
     vm_data_dir_for_config,
 )
 from .constants import ADMIN_USER
+from .core import (
+    validate_nat_custom_network as core_validate_nat_custom_network,
+)
+from .core import (
+    validate_vm_name_length,
+)
 from .network import discover_vm_network, pick_free_subnet, random_mac, resolve_vm_ipv4
 from .provision import (
     admin_keypair,
@@ -71,10 +81,8 @@ def validate_vm_name(vm_name):
     Raises:
         ValueError: If the VM name is too long.
     """
-    if len(vm_name) <= MAX_VM_NAME_LENGTH:
-        return
-
-    raise ValueError(f"vm.name must be {MAX_VM_NAME_LENGTH} characters or fewer")
+    # Delegate to pure function
+    validate_vm_name_length(vm_name, MAX_VM_NAME_LENGTH)
 
 
 def _validate_nat_custom_network(network):
@@ -86,34 +94,8 @@ def _validate_nat_custom_network(network):
     Raises:
         ValueError: If the CIDR or any related IP address is invalid.
     """
-    cidr_text = network["cidr"]
-    try:
-        cidr = ipaddress.ip_network(cidr_text, strict=True)
-    except ValueError as exc:
-        raise ValueError(f"network.cidr must be a valid IPv4 /24 network: {cidr_text}") from exc
-
-    if cidr.version != 4 or cidr.prefixlen != 24:
-        raise ValueError(f"network.cidr must be a valid IPv4 /24 network: {cidr_text}")
-
-    for field in ("gateway", "vm_ip", "dhcp_start", "dhcp_end"):
-        value = network[field]
-        try:
-            address = ipaddress.ip_address(value)
-        except ValueError as exc:
-            raise ValueError(f"network.{field} must be a valid IPv4 address: {value}") from exc
-
-        if address.version != 4:
-            raise ValueError(f"network.{field} must be a valid IPv4 address: {value}")
-        if address not in cidr:
-            raise ValueError(f"network.{field} must be inside network.cidr {cidr_text}: {value}")
-
-    dhcp_start = ipaddress.ip_address(network["dhcp_start"])
-    dhcp_end = ipaddress.ip_address(network["dhcp_end"])
-    if dhcp_start > dhcp_end:
-        raise ValueError(
-            "network.dhcp_start must not be greater than network.dhcp_end: "
-            f"{dhcp_start} > {dhcp_end}"
-        )
+    # Delegate to pure function from core
+    core_validate_nat_custom_network(network)
 
 
 def build_network_config(vm_name, net_cfg):
@@ -280,17 +262,19 @@ def build_render_context(
     Returns:
         dict: Template context for cloud-init rendering.
     """
-    return {
-        "vm_name": vm_name,
-        "admin_user": ADMIN_USER,
-        "admin_public_key": admin_public_key,
-        "vm_user": vm_user,
-        "vm_public_key": vm_public_key,
-        "vm_sudo": "ALL=(ALL) NOPASSWD:ALL" if allow_sudo else "false",
-        "packages": packages,
-        "dns_resolvers": dns_resolvers,
-        "setup_script_content": setup_script_content,
-    }
+    # Delegate to pure function from core
+    from .core import build_cloud_init_context
+    return build_cloud_init_context(
+        vm_name=vm_name,
+        admin_user=ADMIN_USER,
+        admin_public_key=admin_public_key,
+        vm_user=vm_user,
+        vm_public_key=vm_public_key,
+        allow_sudo=allow_sudo,
+        packages=tuple(packages),
+        dns_resolvers=tuple(dns_resolvers),
+        setup_script_content=setup_script_content,
+    )
 
 
 def print_create_summary(vm_name, vm_user, trust, network, admin_private_key, ports):

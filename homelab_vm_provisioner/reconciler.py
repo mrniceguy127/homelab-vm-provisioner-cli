@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import default_vm_state_root, load_config, load_global_config, load_vm_state
 from .constants import BLOCKED_PRIVATE_RANGES, PROJECT_DIR
+from .core import normalize_network_profile as core_normalize_network_profile
 from .managed_nftables import apply_ruleset as apply_managed_nftables_ruleset
 from .managed_nftables import verify_tables as verify_managed_nftables_tables
 from .provision import bridge_interface_exists, cleanup_bridge_interface
@@ -54,15 +55,8 @@ def blocked_private_lan_targets(network_groups, global_config=None):
 
 def normalize_network_profile(network):
     """Map legacy and current network identifiers into one profile value."""
-    profile = str((network or {}).get("profile") or (network or {}).get("mode") or "isolated_nat")
-    profile = profile.strip().lower()
-    if profile in ("bridge", "bridged"):
-        return "bridged"
-    if profile == "private":
-        return "private"
-    if profile in ("nat-auto", "nat-custom", "nat", "isolated_nat"):
-        return "isolated_nat" if profile.startswith("nat-") else profile
-    return "isolated_nat"
+    # Delegate to pure function from core
+    return core_normalize_network_profile(network)
 
 
 def configured_vm_records():

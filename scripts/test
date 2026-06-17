@@ -18,4 +18,4 @@ else
     "$PYTHON_BIN" -m ruff check "$ROOT_DIR/homelab_vm_provisioner" "$ROOT_DIR/tests" || exit 1
 fi
 
-exec "$PYTHON_BIN" -m unittest tests.test_config tests.test_provision tests.test_managed_nftables tests.test_reconciler tests.test_main tests.test_network tests.test_system tests.test_cli tests.test_integration
+exec "$PYTHON_BIN" -m unittest tests.test_config tests.test_provision tests.test_adapters tests.test_services tests.test_managed_nftables tests.test_reconciler tests.test_main tests.test_network tests.test_system tests.test_cli tests.test_integration
