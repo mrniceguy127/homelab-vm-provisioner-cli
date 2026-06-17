@@ -1,8 +1,9 @@
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from helpers import completed_process
+from .helpers import completed_process
 
 from homelab_vm_provisioner import system
 
@@ -99,3 +100,61 @@ class RequireToolsTests(unittest.TestCase):
             self.assertIsNone(system.require_tools())
 
         tool_exists_mock.assert_called_once_with("virsh")
+
+
+class VmLifecycleLockErrorTests(unittest.TestCase):
+    def test_constructs_message_with_vm_name(self):
+        err = system.VmLifecycleLockError("create", vm_name="demo")
+        
+        self.assertIn("create for demo", str(err))
+        self.assertEqual(err.details["operation"], "create")
+        self.assertEqual(err.details["vm_name"], "demo")
+
+    def test_constructs_message_with_holder_operation(self):
+        holder = {"operation": "destroy", "vm_name": "alpha"}
+        err = system.VmLifecycleLockError("create", vm_name="demo", holder=holder)
+        
+        self.assertIn("destroy for alpha", str(err))
+
+    def test_constructs_message_with_holder_operation_only(self):
+        holder = {"operation": "snapshot"}
+        err = system.VmLifecycleLockError("create", vm_name="demo", holder=holder)
+        
+        self.assertIn("snapshot", str(err))
+
+    def test_constructs_message_without_holder(self):
+        err = system.VmLifecycleLockError("create", vm_name="demo")
+        
+        self.assertIn("another lifecycle operation", str(err))
+
+
+class LockHolderDetailsTests(unittest.TestCase):
+    def test_returns_json_from_lock_file(self):
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as f:
+            f.write('{"operation": "create", "vm_name": "demo"}')
+            f.flush()
+            f.seek(0)
+            
+            details = system._lock_holder_details(f)
+            
+            self.assertEqual(details["operation"], "create")
+            self.assertEqual(details["vm_name"], "demo")
+
+    def test_returns_none_for_empty_file(self):
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as f:
+            f.flush()
+            f.seek(0)
+            
+            details = system._lock_holder_details(f)
+            
+            self.assertIsNone(details)
+
+    def test_returns_raw_for_invalid_json(self):
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as f:
+            f.write("not-json")
+            f.flush()
+            f.seek(0)
+            
+            details = system._lock_holder_details(f)
+            
+            self.assertEqual(details, {"raw": "not-json"})

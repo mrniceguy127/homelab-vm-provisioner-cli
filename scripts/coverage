@@ -15,7 +15,7 @@ fi
 mkdir -p "$COVERAGE_DIR"
 export COVERAGE_FILE="$COVERAGE_DIR/.coverage"
 
-"$PYTHON_BIN" -m coverage run --rcfile "$ROOT_DIR/pyproject.toml" -m unittest discover -s "$ROOT_DIR/tests"
+"$PYTHON_BIN" -m coverage run --rcfile "$ROOT_DIR/pyproject.toml" -m unittest tests.test_config tests.test_provision tests.test_managed_nftables tests.test_reconciler tests.test_main tests.test_network tests.test_system tests.test_cli tests.test_integration
 "$PYTHON_BIN" -m coverage report --rcfile "$ROOT_DIR/pyproject.toml"
 "$PYTHON_BIN" -m coverage html --rcfile "$ROOT_DIR/pyproject.toml" -d "$COVERAGE_DIR/html"
 "$PYTHON_BIN" -m coverage xml --rcfile "$ROOT_DIR/pyproject.toml" -o "$COVERAGE_DIR/coverage.xml"

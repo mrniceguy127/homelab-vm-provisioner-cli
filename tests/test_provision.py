@@ -334,10 +334,25 @@ class LibvirtProvisionTests(unittest.TestCase):
                     return Path(tmpdir)
                 return Path(path_str)
 
+            def fake_subprocess_run(cmd, **kwargs):
+                # Handle sudo tee command - actually write the file
+                if "tee" in cmd:
+                    xml_content = kwargs.get("input", "")
+                    target_path = Path(cmd[cmd.index("tee") + 1])
+                    target_path.write_text(xml_content, encoding="utf-8")
+                    return type("Result", (), {"returncode": 0})()
+                # Handle virsh net-info - return failure (network doesn't exist)
+                if "net-info" in cmd:
+                    return type("Result", (), {"returncode": 1})()
+                # Handle ip link show - return failure (bridge doesn't exist)
+                if "link" in cmd and "show" in cmd:
+                    return type("Result", (), {"returncode": 1})()
+                return type("Result", (), {"returncode": 0})()
+
             with patch.object(provision, "Path", side_effect=fake_path), patch.object(
                 provision.subprocess,
                 "run",
-                return_value=type("Result", (), {"returncode": 1})(),
+                side_effect=fake_subprocess_run,
             ), patch.object(provision, "run") as run_mock:
                 provision.create_nat_network(
                     "demo",
@@ -398,15 +413,30 @@ class LibvirtProvisionTests(unittest.TestCase):
                     return Path(tmpdir)
                 return Path(path_str)
 
+            call_count = [0]
+            
+            def fake_subprocess_run(cmd, **kwargs):
+                call_count[0] += 1
+                # Handle sudo tee command - actually write the file
+                if "tee" in cmd:
+                    xml_content = kwargs.get("input", "")
+                    target_path = Path(cmd[cmd.index("tee") + 1])
+                    target_path.write_text(xml_content, encoding="utf-8")
+                    return type("Result", (), {"returncode": 0})()
+                # First call: virsh net-info - return failure (network doesn't exist)
+                if call_count[0] == 2 and "net-info" in cmd:
+                    return type("Result", (), {"returncode": 1})()
+                # Second call: ip link show - return success (bridge exists)
+                if call_count[0] == 3 and "link" in cmd and "show" in cmd:
+                    return type("Result", (), {"returncode": 0})()
+                return type("Result", (), {"returncode": 0})()
+
             with patch.object(provision, "Path", side_effect=fake_path), patch.object(
                 provision, "default_nat_bridge_name", return_value="virbr-demo"
             ), patch.object(
                 provision.subprocess,
                 "run",
-                side_effect=[
-                    type("Result", (), {"returncode": 1})(),
-                    type("Result", (), {"returncode": 0})(),
-                ],
+                side_effect=fake_subprocess_run,
             ), patch.object(provision, "run") as run_mock:
                 provision.create_nat_network(
                     "demo",

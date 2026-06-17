@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
-from helpers import completed_process
+from .helpers import completed_process
 
 from homelab_vm_provisioner import cli
 
@@ -825,6 +825,8 @@ class CreateTests(unittest.TestCase):
         }
 
         with patch.object(cli, "require_tools"), patch.object(
+            cli, "resolve_config_path", return_value="/configs/demo.yaml"
+        ), patch.object(
             cli, "load_config", return_value={"vm": {"name": "demo"}}
         ), patch.object(
             cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
@@ -1233,3 +1235,632 @@ class DestroyTests(unittest.TestCase):
             ],
         )
         cleanup_bridge_mock.assert_not_called()
+
+
+class StopTests(unittest.TestCase):
+    def test_stop_command_stops_running_vm(self):
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
+        ), patch.object(
+            cli, "stop_vm_domain", return_value=True
+        ) as stop_domain_mock:
+            cli.stop("demo")
+        
+        stop_domain_mock.assert_called_once_with("demo")
+
+    def test_stop_command_skips_already_stopped_vm(self):
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
+        ), patch.object(
+            cli, "stop_vm_domain", return_value=False
+        ) as stop_domain_mock:
+            cli.stop("demo")
+        
+        stop_domain_mock.assert_called_once_with("demo")
+
+    def test_stop_vm_domain_shuts_down_gracefully(self):
+        with patch.object(cli, "vm_exists", return_value=True), patch.object(
+            cli, "current_domain_state", side_effect=["running", "shut off"]
+        ), patch.object(
+            cli, "run"
+        ) as run_mock, patch.object(
+            cli.time, "monotonic", side_effect=[0, 1]
+        ), patch.object(
+            cli.time, "sleep"
+        ):
+            result = cli.stop_vm_domain("demo")
+        
+        self.assertTrue(result)
+        run_mock.assert_called_once_with(["virsh", "shutdown", "demo"], sudo=True, check=False)
+
+    def test_stop_vm_domain_forces_destroy_on_timeout(self):
+        with patch.object(cli, "vm_exists", return_value=True), patch.object(
+            cli, "current_domain_state", return_value="running"
+        ), patch.object(
+            cli, "run"
+        ) as run_mock, patch.object(
+            cli.time, "monotonic", side_effect=[0, 70]
+        ):
+            result = cli.stop_vm_domain("demo", timeout_seconds=5)
+        
+        self.assertTrue(result)
+        self.assertEqual(run_mock.call_args_list, [
+            call(["virsh", "shutdown", "demo"], sudo=True, check=False),
+            call(["virsh", "destroy", "demo"], sudo=True, check=False)
+        ])
+
+    def test_stop_vm_domain_skips_non_running_vm(self):
+        with patch.object(cli, "vm_exists", return_value=True), patch.object(
+            cli, "current_domain_state", return_value="shut off"
+        ), patch.object(
+            cli, "run"
+        ) as run_mock:
+            result = cli.stop_vm_domain("demo")
+        
+        self.assertFalse(result)
+        run_mock.assert_not_called()
+
+    def test_stop_vm_domain_raises_for_missing_vm(self):
+        with patch.object(cli, "vm_exists", return_value=False):
+            with self.assertRaisesRegex(FileNotFoundError, "VM not found: demo"):
+                cli.stop_vm_domain("demo")
+
+
+class SnapshotCreateTests(unittest.TestCase):
+    def test_snapshot_create_copies_all_vm_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:
+            tmpdir_path = Path(tmpdir)
+            config_path = tmpdir_path / "configs" / "demo.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
+            
+            state_path = tmpdir_path / "state" / "demo.yaml"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("vm_name: demo\n", encoding="utf-8")
+            
+            vm_data_dir = tmpdir_path / "vm-data" / "demo"
+            vm_data_dir.mkdir(parents=True)
+            (vm_data_dir / "user-data").write_text("cloud-init", encoding="utf-8")
+            
+            admin_key = tmpdir_path / "keys" / "demo_admin_ed25519"
+            admin_key.parent.mkdir(parents=True)
+            admin_key.write_text("private", encoding="utf-8")
+            (tmpdir_path / "keys" / "demo_admin_ed25519.pub").write_text("public", encoding="utf-8")
+            
+            disk_path = tmpdir_path / "images" / "demo.qcow2"
+            disk_path.parent.mkdir(parents=True)
+            disk_path.write_text("disk", encoding="utf-8")
+            
+            seed_path = tmpdir_path / "images" / "demo-seed.iso"
+            seed_path.write_text("seed", encoding="utf-8")
+            
+            snapshot_path = tmpdir_path / "snapshots" / "snap-abc123" / "demo"
+            
+            state = {
+                "config_path": str(config_path),
+                "vm_data_dir": str(vm_data_dir),
+                "admin_private_key": str(admin_key),
+            }
+            
+            config_data = {"vm": {"name": "demo"}}
+            global_config = {}
+            
+            stack.enter_context(patch.object(cli, "require_tools"))
+            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
+            stack.enter_context(patch.object(cli, "resolve_config_path", return_value=config_path))
+            stack.enter_context(patch.object(cli, "load_config", return_value=config_data))
+            stack.enter_context(patch.object(cli, "load_global_config", return_value=global_config))
+            stack.enter_context(patch.object(cli, "current_snapshot_id", return_value="snap-abc123"))
+            stack.enter_context(patch.object(cli, "snapshot_path_for_vm", return_value=snapshot_path))
+            stack.enter_context(patch.object(cli, "vm_disk_path", return_value=disk_path))
+            stack.enter_context(patch.object(cli, "seed_iso_path", return_value=seed_path))
+            stack.enter_context(patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()))
+            stop_mock = stack.enter_context(patch.object(cli, "stop_vm_domain", return_value=True))
+            stack.enter_context(patch.object(cli, "vm_exists", return_value=True))
+            start_mock = stack.enter_context(patch.object(cli, "start_vm_domain"))
+            copy_qcow2_mock = stack.enter_context(patch.object(cli, "copy_qcow2_image"))
+            copy_artifact_mock = stack.enter_context(patch.object(cli, "copy_image_artifact"))
+            copy_file_mock = stack.enter_context(patch.object(cli, "copy_local_file"))
+            copy_tree_mock = stack.enter_context(patch.object(cli, "copy_local_tree"))
+            stack.enter_context(patch.object(cli, "state_file_for_vm", return_value=state_path))
+            stack.enter_context(patch.object(cli, "vm_data_dir_for_config", return_value=vm_data_dir))
+            stack.enter_context(patch.object(cli, "resolved_config_assets", return_value={}))
+            stack.enter_context(patch.object(cli, "chown_path_to_current_user"))
+            
+            cli.snapshot_create("demo")
+            
+            stop_mock.assert_called_once_with("demo")
+            start_mock.assert_called_once_with("demo")
+            copy_qcow2_mock.assert_called_once()
+            self.assertTrue(copy_artifact_mock.called)
+            self.assertTrue(copy_file_mock.called)
+            copy_tree_mock.assert_called_once()
+
+    def test_snapshot_create_cleans_up_on_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:
+            tmpdir_path = Path(tmpdir)
+            config_path = tmpdir_path / "configs" / "demo.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
+            
+            disk_path = tmpdir_path / "images" / "demo.qcow2"
+            disk_path.parent.mkdir(parents=True)
+            disk_path.write_text("disk", encoding="utf-8")
+            
+            seed_path = tmpdir_path / "images" / "demo-seed.iso"
+            seed_path.write_text("seed", encoding="utf-8")
+            
+            snapshot_path = tmpdir_path / "snapshots" / "snap-abc123" / "demo"
+            
+            state = {"config_path": str(config_path)}
+            
+            stack.enter_context(patch.object(cli, "require_tools"))
+            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
+            stack.enter_context(patch.object(cli, "resolve_config_path", return_value=config_path))
+            stack.enter_context(patch.object(cli, "load_config", return_value={"vm": {"name": "demo"}}))
+            stack.enter_context(patch.object(cli, "load_global_config", return_value={}))
+            stack.enter_context(patch.object(cli, "current_snapshot_id", return_value="snap-abc123"))
+            stack.enter_context(patch.object(cli, "snapshot_path_for_vm", return_value=snapshot_path))
+            stack.enter_context(patch.object(cli, "vm_disk_path", return_value=disk_path))
+            stack.enter_context(patch.object(cli, "seed_iso_path", return_value=seed_path))
+            stack.enter_context(patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(cli, "stop_vm_domain", return_value=False))
+            stack.enter_context(patch.object(cli, "vm_exists", return_value=True))
+            stack.enter_context(patch.object(cli, "copy_qcow2_image", side_effect=RuntimeError("copy failed")))
+            stack.enter_context(patch.object(cli, "state_file_for_vm", return_value=Path("/nonexistent")))
+            stack.enter_context(patch.object(cli, "vm_data_dir_for_config", return_value=Path("/nonexistent")))
+            stack.enter_context(patch.object(cli, "resolved_config_assets", return_value={}))
+            
+            with self.assertRaisesRegex(RuntimeError, "copy failed"):
+                cli.snapshot_create("demo")
+            
+            self.assertFalse(snapshot_path.exists())
+
+    def test_snapshot_create_raises_for_missing_config_path(self):
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_vm_state", return_value={}
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "No saved config path"):
+                cli.snapshot_create("demo")
+
+    def test_snapshot_create_raises_for_missing_disk(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            config_path = tmpdir_path / "configs" / "demo.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
+            
+            missing_disk = tmpdir_path / "images" / "demo.qcow2"
+            
+            with patch.object(cli, "require_tools"), patch.object(
+                cli, "load_vm_state", return_value={"config_path": str(config_path)}
+            ), patch.object(
+                cli, "resolve_config_path", return_value=config_path
+            ), patch.object(
+                cli, "load_config", return_value={"vm": {"name": "demo"}}
+            ), patch.object(
+                cli, "load_global_config", return_value={}
+            ), patch.object(
+                cli, "current_snapshot_id", return_value="snap-abc123"
+            ), patch.object(
+                cli, "vm_disk_path", return_value=missing_disk
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "VM disk was not found"):
+                    cli.snapshot_create("demo")
+
+
+class StartVmDomainTests(unittest.TestCase):
+    def test_start_vm_domain_starts_stopped_vm(self):
+        with patch.object(cli, "vm_exists", return_value=True), patch.object(
+            cli, "current_domain_state", return_value="shut off"
+        ), patch.object(
+            cli, "run"
+        ) as run_mock:
+            result = cli.start_vm_domain("demo")
+        
+        self.assertTrue(result)
+        run_mock.assert_called_once_with(["virsh", "start", "demo"], sudo=True)
+
+    def test_start_vm_domain_skips_running_vm(self):
+        with patch.object(cli, "vm_exists", return_value=True), patch.object(
+            cli, "current_domain_state", return_value="running"
+        ), patch.object(
+            cli, "run"
+        ) as run_mock:
+            result = cli.start_vm_domain("demo")
+        
+        self.assertFalse(result)
+        run_mock.assert_not_called()
+
+    def test_start_vm_domain_raises_for_missing_vm(self):
+        with patch.object(cli, "vm_exists", return_value=False):
+            with self.assertRaisesRegex(FileNotFoundError, "VM not found: demo"):
+                cli.start_vm_domain("demo")
+
+
+class StartCommandTests(unittest.TestCase):
+    def test_start_command_with_network_group(self):
+        state = {"network": {"network_group_id": "ng-demo"}}
+        
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
+        ), patch.object(
+            cli, "load_vm_state", return_value=state
+        ), patch.object(
+            cli, "reconcile_networking"
+        ) as reconcile_mock, patch.object(
+            cli, "start_vm_domain", return_value=True
+        ) as start_mock:
+            cli.start("demo")
+        
+        reconcile_mock.assert_called_once()
+        start_mock.assert_called_once_with("demo")
+
+    def test_start_command_with_nat_network(self):
+        state = {"network": {"mode": "nat-custom"}}
+        
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
+        ), patch.object(
+            cli, "load_vm_state", return_value=state
+        ), patch.object(
+            cli, "is_libvirt_nat_network", return_value=True
+        ), patch.object(
+            cli, "reconcile_networking"
+        ) as reconcile_mock, patch.object(
+            cli, "start_vm_domain", return_value=False
+        ):
+            cli.start("demo")
+        
+        reconcile_mock.assert_called_once()
+
+
+class HelperFunctionTests(unittest.TestCase):
+    def test_current_domain_state_returns_state(self):
+        with patch.object(cli, "capture_or_none", return_value="running"):
+            state = cli.current_domain_state("demo")
+        
+        self.assertEqual(state, "running")
+
+    def test_merged_vm_network_merges_state_and_discovery(self):
+        state = {"network": {"name": "demo-net", "vm_ip": "192.168.1.50"}}
+        
+        with patch.object(
+            cli, "discover_vm_network", return_value={"vm_ip": "192.168.1.55", "gateway": "192.168.1.1"}
+        ), patch.object(
+            cli, "is_libvirt_nat_network", return_value=True
+        ), patch.object(
+            cli, "default_nat_bridge_name", return_value="virbr-demo"
+        ):
+            network = cli.merged_vm_network("demo", state)
+        
+        self.assertEqual(network["name"], "demo-net")
+        self.assertEqual(network["vm_ip"], "192.168.1.55")
+        self.assertEqual(network["gateway"], "192.168.1.1")
+        self.assertEqual(network["bridge_name"], "virbr-demo")
+
+    def test_is_libvirt_nat_network_detects_nat_mode(self):
+        self.assertTrue(cli.is_libvirt_nat_network({"mode": "nat-auto"}))
+        self.assertTrue(cli.is_libvirt_nat_network({"mode": "nat-custom"}))
+
+
+class RuntimeCleanupTests(unittest.TestCase):
+    def test_cleanup_vm_runtime_definition_removes_domain(self):
+        network = {"network_group_id": "ng-demo"}
+        
+        with patch.object(cli, "vm_exists", return_value=True), patch.object(
+            cli, "run"
+        ) as run_mock, patch.object(
+            cli, "cleanup_vm_storage"
+        ) as cleanup_storage_mock:
+            cli.cleanup_vm_runtime_definition("demo", network, [], remove_storage=True)
+        
+        cleanup_storage_mock.assert_called_once_with("demo")
+        self.assertEqual(run_mock.call_args_list, [
+            call(["virsh", "destroy", "demo"], sudo=True, check=False),
+            call(["virsh", "undefine", "demo", "--remove-all-storage"], sudo=True, check=False)
+        ])
+
+    def test_cleanup_vm_runtime_definition_removes_nat_network(self):
+        network = {"mode": "nat-custom", "name": "demo-net", "bridge_name": "virbr-demo"}
+        
+        with patch.object(cli, "vm_exists", return_value=False), patch.object(
+            cli, "is_libvirt_nat_network", return_value=True
+        ), patch.object(
+            cli, "run"
+        ) as run_mock, patch.object(
+            cli, "default_nat_bridge_name", return_value="virbr-89e495e7"
+        ), patch.object(
+            cli, "legacy_nat_bridge_name", return_value="virbr-demo-legacy"
+        ), patch.object(
+            cli, "bridge_interface_exists", side_effect=[False, False, True]
+        ), patch.object(
+            cli, "cleanup_bridge_interface"
+        ) as cleanup_bridge_mock:
+            cli.cleanup_vm_runtime_definition("demo", network, [], remove_storage=False)
+        
+        self.assertEqual(run_mock.call_args_list, [
+            call(["virsh", "net-destroy", "demo-net"], sudo=True, check=False),
+            call(["virsh", "net-undefine", "demo-net"], sudo=True, check=False)
+        ])
+        # Set iteration order is unpredictable - just check it was called once with one of the bridge names
+        cleanup_bridge_mock.assert_called_once()
+        self.assertIn(cleanup_bridge_mock.call_args[0][0], ["virbr-demo", "virbr-89e495e7", "virbr-demo-legacy"])
+
+
+class SnapshotHelperTests(unittest.TestCase):
+    def test_snapshot_metadata_path_constructs_path(self):
+        snapshot_path = Path("/snapshots/demo/snap-1")
+        metadata_path = cli.snapshot_metadata_path(snapshot_path)
+        
+        self.assertEqual(metadata_path, snapshot_path / "metadata.yaml")
+
+    def test_load_snapshot_metadata_returns_data(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "snap-1"
+            snapshot_path.mkdir()
+            metadata_file = snapshot_path / "metadata.yaml"
+            metadata_file.write_text("snapshot_id: snap-1\ncreated_at: '2024-01-01T10:00:00Z'\n", encoding="utf-8")
+            
+            with patch.object(cli, "snapshot_path_for_vm", return_value=snapshot_path):
+                metadata = cli.load_snapshot_metadata("demo", "snap-1")
+            
+            self.assertEqual(metadata["snapshot_id"], "snap-1")
+            self.assertEqual(metadata["created_at"], "2024-01-01T10:00:00Z")
+
+    def test_load_snapshot_metadata_raises_for_missing_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "snap-missing"
+            
+            with patch.object(cli, "snapshot_path_for_vm", return_value=snapshot_path):
+                with self.assertRaisesRegex(FileNotFoundError, "Snapshot not found"):
+                    cli.load_snapshot_metadata("demo", "snap-missing")
+
+    def test_list_snapshots_returns_empty_for_missing_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "missing"
+            
+            with patch.object(cli, "snapshot_root_for_vm", return_value=root):
+                snapshots = cli.list_snapshots("demo")
+            
+            self.assertEqual(snapshots, [])
+
+    def test_list_snapshots_returns_sorted_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            
+            snap1 = root / "snap-1"
+            snap1.mkdir()
+            (snap1 / "metadata.yaml").write_text(
+                "snapshot_id: snap-1\ncreated_at: 2024-01-01T10:00:00Z\n", encoding="utf-8"
+            )
+            
+            snap2 = root / "snap-2"
+            snap2.mkdir()
+            (snap2 / "metadata.yaml").write_text(
+                "snapshot_id: snap-2\ncreated_at: 2024-01-02T10:00:00Z\n", encoding="utf-8"
+            )
+            
+            with patch.object(cli, "snapshot_root_for_vm", return_value=root):
+                snapshots = cli.list_snapshots("demo")
+            
+            self.assertEqual(len(snapshots), 2)
+            self.assertEqual(snapshots[0]["snapshot_id"], "snap-2")  # Most recent first
+            self.assertEqual(snapshots[1]["snapshot_id"], "snap-1")
+
+
+class BuildNetworkConfigTests(unittest.TestCase):
+    def test_build_managed_network_from_network_group(self):
+        net_cfg = {
+            "network_group_id": "ng-demo",
+            "group_name": "demo-group",
+            "libvirt_network_name": "hvp-ng-demo",
+            "bridge_name": "hvpb-demo",
+            "subnet_cidr": "10.80.0.0/28",
+            "gateway_ip": "10.80.0.1",
+            "dhcp_start": "10.80.0.2",
+            "dhcp_end": "10.80.0.14",
+            "vm_ip": "10.80.0.2",
+            "mac": "52:54:00:11:22:33",
+        }
+        
+        with patch.object(cli, "normalize_network_profile", return_value="isolated_nat"):
+            network = cli.build_network_config("demo", net_cfg)
+        
+        self.assertEqual(network["network_group_id"], "ng-demo")
+        self.assertEqual(network["profile"], "isolated_nat")
+        self.assertEqual(network["mode"], "isolated_nat")
+        self.assertEqual(network["bridge_name"], "hvpb-demo")
+
+    def test_build_bridged_network_sets_defaults(self):
+        net_cfg = {"mode": "bridge"}
+        
+        network = cli.build_network_config("demo", net_cfg)
+        
+        self.assertEqual(network["mode"], "bridge")
+        self.assertEqual(network["bridge_name"], "br0")
+        self.assertEqual(network["vm_ip"], "dhcp-from-router")
+        self.assertEqual(network["cidr"], "main-lan")
+
+    def test_build_nat_auto_network(self):
+        net_cfg = {"mode": "nat-auto"}
+        
+        subnet_info = {
+            "prefix": "192.168.240",
+            "cidr": "192.168.240.0/24",
+            "gateway": "192.168.240.1",
+            "vm_ip": "192.168.240.50",
+            "dhcp_start": "192.168.240.50",
+            "dhcp_end": "192.168.240.99",
+        }
+        
+        with patch.object(cli, "random_mac", return_value="52:54:00:aa:bb:cc"), patch.object(
+            cli, "pick_free_subnet", return_value=subnet_info
+        ), patch.object(
+            cli, "default_nat_bridge_name", return_value="virbr-demo"
+        ):
+            network = cli.build_network_config("demo", net_cfg)
+        
+        self.assertEqual(network["mode"], "nat-auto")
+        self.assertEqual(network["mac"], "52:54:00:aa:bb:cc")
+        self.assertEqual(network["prefix"], "192.168.240")
+        self.assertEqual(network["gateway"], "192.168.240.1")
+
+    def test_build_nat_custom_network_from_subnet_prefix(self):
+        net_cfg = {"mode": "nat-custom", "subnet_prefix": "192.168.100"}
+        
+        with patch.object(cli, "random_mac", return_value="52:54:00:aa:bb:cc"), patch.object(
+            cli, "default_nat_bridge_name", return_value="virbr-demo"
+        ):
+            network = cli.build_network_config("demo", net_cfg)
+        
+        self.assertEqual(network["mode"], "nat-custom")
+        self.assertEqual(network["prefix"], "192.168.100")
+        self.assertEqual(network["gateway"], "192.168.100.1")
+        self.assertEqual(network["vm_ip"], "192.168.100.50")
+        self.assertEqual(network["dhcp_start"], "192.168.100.50")
+        self.assertEqual(network["dhcp_end"], "192.168.100.99")
+
+    def test_build_nat_custom_network_raises_for_invalid_prefix(self):
+        net_cfg = {"mode": "nat-custom", "subnet_prefix": "invalid"}
+        
+        with self.assertRaisesRegex(ValueError, "subnet_prefix must be a valid IPv4 prefix"):
+            cli.build_network_config("demo", net_cfg)
+
+    def test_build_nat_custom_network_raises_for_missing_fields(self):
+        net_cfg = {"mode": "nat-custom"}  # No subnet_prefix or explicit fields
+        
+        with self.assertRaisesRegex(ValueError, "Missing nat-custom network fields"):
+            cli.build_network_config("demo", net_cfg)
+
+    def test_build_nat_custom_network_from_explicit_fields(self):
+        net_cfg = {
+            "mode": "nat-custom",
+            "cidr": "192.168.100.0/24",
+            "gateway": "192.168.100.1",
+            "vm_ip": "192.168.100.50",
+            "dhcp_start": "192.168.100.50",
+            "dhcp_end": "192.168.100.99",
+        }
+        
+        with patch.object(cli, "random_mac", return_value="52:54:00:aa:bb:cc"), patch.object(
+            cli, "default_nat_bridge_name", return_value="virbr-demo"
+        ):
+            network = cli.build_network_config("demo", net_cfg)
+        
+        self.assertEqual(network["mode"], "nat-custom")
+        self.assertEqual(network["cidr"], "192.168.100.0/24")
+        self.assertEqual(network["gateway"], "192.168.100.1")
+
+    def test_build_network_raises_for_invalid_mode(self):
+        net_cfg = {"mode": "invalid-mode"}
+        
+        with self.assertRaisesRegex(ValueError, "must be nat-auto, nat-custom, or bridge"):
+            cli.build_network_config("demo", net_cfg)
+
+    def test_build_network_raises_for_missing_managed_fields(self):
+        net_cfg = {
+            "network_group_id": "ng-demo",
+            "libvirt_network_name": "hvp-ng-demo",
+            # Missing required fields
+        }
+        
+        with patch.object(cli, "normalize_network_profile", return_value="isolated_nat"):
+            with self.assertRaisesRegex(ValueError, "Missing managed network-group fields"):
+                cli.build_network_config("demo", net_cfg)
+
+
+class DestroyTests(unittest.TestCase):
+    def test_destroy_removes_vm(self):
+        state = {
+            "vm_name": "demo",
+            "network": {"mode": "nat-auto", "prefix": "192.168.240"},
+            "ports": [],
+        }
+        
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(cli, "host_lifecycle_lock"))
+            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
+            stack.enter_context(patch.object(cli, "merged_vm_network", return_value=state["network"]))
+            stack.enter_context(patch.object(cli, "is_libvirt_nat_network", return_value=True))
+            cleanup_mock = stack.enter_context(patch.object(cli, "cleanup_vm_runtime_definition"))
+            artifacts_mock = stack.enter_context(patch.object(cli, "cleanup_local_vm_artifacts"))
+            reconcile_mock = stack.enter_context(patch.object(cli, "reconcile_networking"))
+            
+            cli.destroy("demo")
+            
+            cleanup_mock.assert_called_once_with("demo", state["network"], [], remove_storage=True)
+            artifacts_mock.assert_called_once()
+            reconcile_mock.assert_called_once_with(policy_only=True)
+
+    def test_destroy_reconciles_for_network_group(self):
+        state = {
+            "vm_name": "demo",
+            "network": {"mode": "isolated_nat", "network_group_id": "ng-demo"},
+            "ports": [],
+        }
+        
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(cli, "host_lifecycle_lock"))
+            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
+            stack.enter_context(patch.object(cli, "merged_vm_network", return_value=state["network"]))
+            stack.enter_context(patch.object(cli, "validate_networking_changes"))
+            stack.enter_context(patch.object(cli, "cleanup_vm_runtime_definition"))
+            stack.enter_context(patch.object(cli, "cleanup_local_vm_artifacts"))
+            reconcile_mock = stack.enter_context(patch.object(cli, "reconcile_networking"))
+            stack.enter_context(patch.object(cli, "is_libvirt_nat_network", return_value=False))
+            stack.enter_context(patch.object(cli, "planned_managed_vm_records", return_value=[]))
+            
+            cli.destroy("demo")
+            
+            reconcile_mock.assert_called_once_with()  # No policy_only for network groups
+
+
+class ValidateNatCustomNetworkTests(unittest.TestCase):
+    def test_validates_invalid_cidr(self):
+        network = {"cidr": "invalid"}
+        
+        with self.assertRaisesRegex(ValueError, "must be a valid IPv4 /24 network"):
+            cli._validate_nat_custom_network(network)
+
+    def test_validates_non_24_prefix(self):
+        network = {"cidr": "192.168.1.0/16"}
+        
+        with self.assertRaisesRegex(ValueError, "must be a valid IPv4 /24 network"):
+            cli._validate_nat_custom_network(network)
+
+    def test_validates_invalid_gateway(self):
+        network = {
+            "cidr": "192.168.1.0/24",
+            "gateway": "invalid",
+            "vm_ip": "192.168.1.50",
+            "dhcp_start": "192.168.1.50",
+            "dhcp_end": "192.168.1.99",
+        }
+        
+        with self.assertRaisesRegex(ValueError, "gateway must be a valid IPv4 address"):
+            cli._validate_nat_custom_network(network)
+
+    def test_validates_gateway_outside_cidr(self):
+        network = {
+            "cidr": "192.168.1.0/24",
+            "gateway": "192.168.2.1",
+            "vm_ip": "192.168.1.50",
+            "dhcp_start": "192.168.1.50",
+            "dhcp_end": "192.168.1.99",
+        }
+        
+        with self.assertRaisesRegex(ValueError, "gateway must be inside network.cidr"):
+            cli._validate_nat_custom_network(network)
+
+    def test_validates_dhcp_start_greater_than_end(self):
+        network = {
+            "cidr": "192.168.1.0/24",
+            "gateway": "192.168.1.1",
+            "vm_ip": "192.168.1.50",
+            "dhcp_start": "192.168.1.99",
+            "dhcp_end": "192.168.1.50",
+        }
+        
+        with self.assertRaisesRegex(ValueError, "dhcp_start must not be greater than"):
+            cli._validate_nat_custom_network(network)

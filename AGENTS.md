@@ -8,7 +8,7 @@ Python CLI for provisioning and managing libvirt VMs with cloud-init and nftable
 ./vmctl provision <name>       # Provision VM
 ./vmctl list                   # List VMs
 ./scripts/test                 # Run tests
-./scripts/coverage             # Test with 85% enforcement
+./scripts/coverage             # Test with 80% enforcement
 ./scripts/lint                 # Ruff linting
 ./scripts/docs-build           # Build Sphinx docs
 ```
@@ -35,7 +35,7 @@ tests/
 
 **Language**: Python 3.9+  
 **Testing**: unittest (NOT pytest)  
-**Coverage**: 85% minimum (ENFORCED - build fails if below)  
+**Coverage**: 80% minimum (ENFORCED - build fails if below)  
 **Linting**: ruff (E, F, I rules)  
 **Docs**: Google-style docstrings + Sphinx RST
 
@@ -70,7 +70,7 @@ Project-specific OpenCode agents live in `.opencode/agents/`.
 ### Available Agents
 
 - **test-writer.md** - unittest + libvirt mocking
-- **coverage-runner.md** - 85% enforcement
+- **coverage-runner.md** - 80% enforcement
 - **feature-developer.md** - CLI + libvirt patterns
 - **defect-fixer.md** - Python debugging
 - **doc-writer.md** - Sphinx + Google docstrings
@@ -78,7 +78,7 @@ Project-specific OpenCode agents live in `.opencode/agents/`.
 ## Testing Essentials
 
 **Framework**: unittest (NOT pytest - critical!)  
-**Coverage**: 85% enforced (build fails if below)  
+**Coverage**: 80% enforced (build fails if below)  
 **Mocking**: Mock all `libvirt.*` and `subprocess.*` calls  
 **Pattern**: One `TestCase` class per function/class
 

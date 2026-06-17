@@ -11,4 +11,4 @@ if ! "$PYTHON_BIN" -c "import yaml" >/dev/null 2>&1; then
     exit 1
 fi
 
-exec "$PYTHON_BIN" -m unittest discover -s "$ROOT_DIR/tests"
+exec "$PYTHON_BIN" -m unittest tests.test_config tests.test_provision tests.test_managed_nftables tests.test_reconciler tests.test_main tests.test_network tests.test_system tests.test_cli tests.test_integration

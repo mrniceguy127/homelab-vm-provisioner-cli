@@ -2,7 +2,7 @@ import textwrap
 import unittest
 from unittest.mock import call, patch
 
-from helpers import completed_process
+from .helpers import completed_process
 
 from homelab_vm_provisioner import network
 

@@ -488,3 +488,5 @@ class StateFileTests(unittest.TestCase):
                 loaded = config.load_vm_state("demo")
 
         self.assertEqual(loaded["config_path"], str(current_config_path))
+
+

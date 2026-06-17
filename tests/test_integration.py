@@ -5,7 +5,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from helpers import completed_process
+from .helpers import completed_process
 
 from homelab_vm_provisioner import cli, config, managed_nftables, network, provision, reconciler
 
@@ -258,6 +258,7 @@ class IntegrationTests(unittest.TestCase):
         stack.enter_context(patch.object(config, "PROJECT_DIR", root_dir))
         stack.enter_context(patch.object(config, "GLOBAL_CONFIG_PATH", root_dir / "vmctl.yaml"))
         stack.enter_context(patch.object(config, "LEGACY_VM_BUILD_DIR", root_dir / ".build"))
+        stack.enter_context(patch.object(reconciler, "PROJECT_DIR", root_dir))
         stack.enter_context(patch.object(provision, "IMG_DIR", img_dir))
         stack.enter_context(patch.object(provision, "run", side_effect=host.provision_run))
         stack.enter_context(patch("subprocess.run", side_effect=host.subprocess_run))
@@ -266,6 +267,9 @@ class IntegrationTests(unittest.TestCase):
         )
         stack.enter_context(
             patch.object(reconciler, "verify_managed_nftables_tables", side_effect=host.verify_nftables_tables)
+        )
+        stack.enter_context(
+            patch.object(reconciler, "capture_or_none", side_effect=host.network_capture_or_none)
         )
         stack.enter_context(
             patch.object(network, "capture_or_none", side_effect=host.network_capture_or_none)
