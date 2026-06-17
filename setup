@@ -2,6 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+API_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKSPACE_ROOT="$(cd "$API_DIR/.." && pwd)"
+
+# Source component .env (parent vars inherited through execution sequence)
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
 VENV_DIR="${VENV_DIR:-$SCRIPT_DIR/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 INSTALL_SYSTEM_PACKAGES=1
