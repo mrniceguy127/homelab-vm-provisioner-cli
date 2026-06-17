@@ -11,4 +11,11 @@ if ! "$PYTHON_BIN" -c "import yaml" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Run linting before tests
+if ! "$PYTHON_BIN" -m ruff --version >/dev/null 2>&1; then
+    printf 'Warning: Ruff is unavailable. Run ./setup --dev or set PYTHON_BIN to a dev interpreter.\n' >&2
+else
+    "$PYTHON_BIN" -m ruff check "$ROOT_DIR/homelab_vm_provisioner" "$ROOT_DIR/tests" || exit 1
+fi
+
 exec "$PYTHON_BIN" -m unittest tests.test_config tests.test_provision tests.test_managed_nftables tests.test_reconciler tests.test_main tests.test_network tests.test_system tests.test_cli tests.test_integration

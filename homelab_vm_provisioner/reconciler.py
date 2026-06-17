@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
-from pathlib import Path
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from .config import default_vm_state_root, load_config, load_global_config, load_vm_state
 from .constants import BLOCKED_PRIVATE_RANGES, PROJECT_DIR

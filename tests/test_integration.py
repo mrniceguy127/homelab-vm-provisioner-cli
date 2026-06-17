@@ -5,9 +5,9 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from .helpers import completed_process
-
 from homelab_vm_provisioner import cli, config, managed_nftables, network, provision, reconciler
+
+from .helpers import completed_process
 
 
 class FakeHost:

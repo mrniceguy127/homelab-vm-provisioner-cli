@@ -12,15 +12,15 @@ from pathlib import Path
 import yaml
 
 from .config import (
-    default_snapshot_root,
     default_admin_key_dir,
+    default_snapshot_root,
     dns_settings_for_config,
     image_settings_for_config,
     load_config,
     load_global_config,
     load_vm_state,
-    resolve_setup_script_path,
     resolve_config_path,
+    resolve_setup_script_path,
     resolve_user_key_path,
     save_vm_state,
     state_file_for_vm,

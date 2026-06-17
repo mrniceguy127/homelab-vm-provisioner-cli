@@ -12,6 +12,13 @@ if ! "$PYTHON_BIN" -m coverage --version >/dev/null 2>&1; then
     exit 1
 fi
 
+# Run linting before tests
+if ! "$PYTHON_BIN" -m ruff --version >/dev/null 2>&1; then
+    printf 'Warning: Ruff is unavailable. Run ./setup --dev or set PYTHON_BIN to a dev interpreter.\n' >&2
+else
+    "$PYTHON_BIN" -m ruff check "$ROOT_DIR/homelab_vm_provisioner" "$ROOT_DIR/tests" || exit 1
+fi
+
 mkdir -p "$COVERAGE_DIR"
 export COVERAGE_FILE="$COVERAGE_DIR/.coverage"
 

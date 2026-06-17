@@ -2,9 +2,9 @@ import textwrap
 import unittest
 from unittest.mock import call, patch
 
-from .helpers import completed_process
-
 from homelab_vm_provisioner import network
+
+from .helpers import completed_process
 
 
 class ParseIpv4FromDomifaddrTests(unittest.TestCase):

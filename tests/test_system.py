@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from .helpers import completed_process
-
 from homelab_vm_provisioner import system
+
+from .helpers import completed_process
 
 
 class ToolExistsTests(unittest.TestCase):

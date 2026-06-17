@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
-from .helpers import completed_process
-
 from homelab_vm_provisioner import cli
+
+from .helpers import completed_process
 
 
 def printed_output(print_mock):
@@ -1649,7 +1649,7 @@ class SnapshotHelperTests(unittest.TestCase):
             self.assertEqual(snapshots[1]["snapshot_id"], "snap-1")
 
 
-class BuildNetworkConfigTests(unittest.TestCase):
+class BuildNetworkConfigManagedTests(unittest.TestCase):
     def test_build_managed_network_from_network_group(self):
         net_cfg = {
             "network_group_id": "ng-demo",
@@ -1770,7 +1770,7 @@ class BuildNetworkConfigTests(unittest.TestCase):
                 cli.build_network_config("demo", net_cfg)
 
 
-class DestroyTests(unittest.TestCase):
+class DestroyReconciliationTests(unittest.TestCase):
     def test_destroy_removes_vm(self):
         state = {
             "vm_name": "demo",

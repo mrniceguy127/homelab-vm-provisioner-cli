@@ -41,6 +41,7 @@ extend-exclude = [
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+ignore = ["E501"]  # Line too long - enforce via line-length instead
 
 [tool.ruff.lint.isort]
 known-first-party = ["homelab_vm_provisioner"]
