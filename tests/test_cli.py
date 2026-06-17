@@ -1540,74 +1540,96 @@ class StopTests(unittest.TestCase):
 
 
 class SnapshotCreateTests(unittest.TestCase):
+    def _setup_snapshot_test_fixtures(self, tmpdir_path):
+        """Setup test fixtures for snapshot tests."""
+        config_path = tmpdir_path / "configs" / "demo.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
+        
+        state_path = tmpdir_path / "state" / "demo.yaml"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text("vm_name: demo\n", encoding="utf-8")
+        
+        vm_data_dir = tmpdir_path / "vm-data" / "demo"
+        vm_data_dir.mkdir(parents=True)
+        (vm_data_dir / "user-data").write_text("cloud-init", encoding="utf-8")
+        
+        admin_key = tmpdir_path / "keys" / "demo_admin_ed25519"
+        admin_key.parent.mkdir(parents=True)
+        admin_key.write_text("private", encoding="utf-8")
+        (tmpdir_path / "keys" / "demo_admin_ed25519.pub").write_text("public", encoding="utf-8")
+        
+        disk_path = tmpdir_path / "images" / "demo.qcow2"
+        disk_path.parent.mkdir(parents=True)
+        disk_path.write_text("disk", encoding="utf-8")
+        
+        seed_path = tmpdir_path / "images" / "demo-seed.iso"
+        seed_path.write_text("seed", encoding="utf-8")
+        
+        snapshot_path = tmpdir_path / "snapshots" / "snap-abc123" / "demo"
+        
+        state = {
+            "config_path": str(config_path),
+            "vm_data_dir": str(vm_data_dir),
+            "admin_private_key": str(admin_key),
+        }
+        
+        return {
+            "config_path": config_path,
+            "state_path": state_path,
+            "vm_data_dir": vm_data_dir,
+            "disk_path": disk_path,
+            "seed_path": seed_path,
+            "snapshot_path": snapshot_path,
+            "state": state,
+        }
+
+    def _setup_snapshot_mocks(self, stack, fixtures):
+        """Setup mocks for snapshot tests."""
+        stack.enter_context(patch.object(cli, "require_tools"))
+        stack.enter_context(patch.object(cli, "load_vm_state", return_value=fixtures["state"]))
+        stack.enter_context(patch.object(cli, "resolve_config_path", return_value=fixtures["config_path"]))
+        stack.enter_context(patch.object(cli, "load_config", return_value={"vm": {"name": "demo"}}))
+        stack.enter_context(patch.object(cli, "load_global_config", return_value={}))
+        stack.enter_context(patch.object(cli, "current_snapshot_id", return_value="snap-abc123"))
+        stack.enter_context(patch.object(cli, "snapshot_path_for_vm", return_value=fixtures["snapshot_path"]))
+        stack.enter_context(patch.object(cli, "vm_disk_path", return_value=fixtures["disk_path"]))
+        stack.enter_context(patch.object(cli, "seed_iso_path", return_value=fixtures["seed_path"]))
+        stack.enter_context(patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()))
+        stop_mock = stack.enter_context(patch.object(cli, "stop_vm_domain", return_value=True))
+        stack.enter_context(patch.object(cli, "vm_exists", return_value=True))
+        start_mock = stack.enter_context(patch.object(cli, "start_vm_domain"))
+        copy_qcow2_mock = stack.enter_context(patch.object(cli, "copy_qcow2_image"))
+        copy_artifact_mock = stack.enter_context(patch.object(cli, "copy_image_artifact"))
+        copy_file_mock = stack.enter_context(patch.object(cli, "copy_local_file"))
+        copy_tree_mock = stack.enter_context(patch.object(cli, "copy_local_tree"))
+        stack.enter_context(patch.object(cli, "state_file_for_vm", return_value=fixtures["state_path"]))
+        stack.enter_context(patch.object(cli, "vm_data_dir_for_config", return_value=fixtures["vm_data_dir"]))
+        stack.enter_context(patch.object(cli, "resolved_config_assets", return_value={}))
+        stack.enter_context(patch.object(cli, "chown_path_to_current_user"))
+        
+        return {
+            "stop_mock": stop_mock,
+            "start_mock": start_mock,
+            "copy_qcow2_mock": copy_qcow2_mock,
+            "copy_artifact_mock": copy_artifact_mock,
+            "copy_file_mock": copy_file_mock,
+            "copy_tree_mock": copy_tree_mock,
+        }
+
     def test_snapshot_create_copies_all_vm_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:
-            tmpdir_path = Path(tmpdir)
-            config_path = tmpdir_path / "configs" / "demo.yaml"
-            config_path.parent.mkdir(parents=True)
-            config_path.write_text("vm:\n  name: demo\n", encoding="utf-8")
-            
-            state_path = tmpdir_path / "state" / "demo.yaml"
-            state_path.parent.mkdir(parents=True)
-            state_path.write_text("vm_name: demo\n", encoding="utf-8")
-            
-            vm_data_dir = tmpdir_path / "vm-data" / "demo"
-            vm_data_dir.mkdir(parents=True)
-            (vm_data_dir / "user-data").write_text("cloud-init", encoding="utf-8")
-            
-            admin_key = tmpdir_path / "keys" / "demo_admin_ed25519"
-            admin_key.parent.mkdir(parents=True)
-            admin_key.write_text("private", encoding="utf-8")
-            (tmpdir_path / "keys" / "demo_admin_ed25519.pub").write_text("public", encoding="utf-8")
-            
-            disk_path = tmpdir_path / "images" / "demo.qcow2"
-            disk_path.parent.mkdir(parents=True)
-            disk_path.write_text("disk", encoding="utf-8")
-            
-            seed_path = tmpdir_path / "images" / "demo-seed.iso"
-            seed_path.write_text("seed", encoding="utf-8")
-            
-            snapshot_path = tmpdir_path / "snapshots" / "snap-abc123" / "demo"
-            
-            state = {
-                "config_path": str(config_path),
-                "vm_data_dir": str(vm_data_dir),
-                "admin_private_key": str(admin_key),
-            }
-            
-            config_data = {"vm": {"name": "demo"}}
-            global_config = {}
-            
-            stack.enter_context(patch.object(cli, "require_tools"))
-            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
-            stack.enter_context(patch.object(cli, "resolve_config_path", return_value=config_path))
-            stack.enter_context(patch.object(cli, "load_config", return_value=config_data))
-            stack.enter_context(patch.object(cli, "load_global_config", return_value=global_config))
-            stack.enter_context(patch.object(cli, "current_snapshot_id", return_value="snap-abc123"))
-            stack.enter_context(patch.object(cli, "snapshot_path_for_vm", return_value=snapshot_path))
-            stack.enter_context(patch.object(cli, "vm_disk_path", return_value=disk_path))
-            stack.enter_context(patch.object(cli, "seed_iso_path", return_value=seed_path))
-            stack.enter_context(patch.object(cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()))
-            stop_mock = stack.enter_context(patch.object(cli, "stop_vm_domain", return_value=True))
-            stack.enter_context(patch.object(cli, "vm_exists", return_value=True))
-            start_mock = stack.enter_context(patch.object(cli, "start_vm_domain"))
-            copy_qcow2_mock = stack.enter_context(patch.object(cli, "copy_qcow2_image"))
-            copy_artifact_mock = stack.enter_context(patch.object(cli, "copy_image_artifact"))
-            copy_file_mock = stack.enter_context(patch.object(cli, "copy_local_file"))
-            copy_tree_mock = stack.enter_context(patch.object(cli, "copy_local_tree"))
-            stack.enter_context(patch.object(cli, "state_file_for_vm", return_value=state_path))
-            stack.enter_context(patch.object(cli, "vm_data_dir_for_config", return_value=vm_data_dir))
-            stack.enter_context(patch.object(cli, "resolved_config_assets", return_value={}))
-            stack.enter_context(patch.object(cli, "chown_path_to_current_user"))
+            fixtures = self._setup_snapshot_test_fixtures(Path(tmpdir))
+            mocks = self._setup_snapshot_mocks(stack, fixtures)
             
             cli.snapshot_create("demo")
             
-            stop_mock.assert_called_once_with("demo")
-            start_mock.assert_called_once_with("demo")
-            copy_qcow2_mock.assert_called_once()
-            self.assertTrue(copy_artifact_mock.called)
-            self.assertTrue(copy_file_mock.called)
-            copy_tree_mock.assert_called_once()
+            mocks["stop_mock"].assert_called_once_with("demo")
+            mocks["start_mock"].assert_called_once_with("demo")
+            mocks["copy_qcow2_mock"].assert_called_once()
+            self.assertTrue(mocks["copy_artifact_mock"].called)
+            self.assertTrue(mocks["copy_file_mock"].called)
+            mocks["copy_tree_mock"].assert_called_once()
 
     def test_snapshot_create_cleans_up_on_error(self):
         with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as stack:

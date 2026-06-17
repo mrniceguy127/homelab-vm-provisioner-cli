@@ -1,7 +1,5 @@
 """Reconcile VM networking from saved configuration and runtime state."""
 
-from __future__ import annotations
-
 import ipaddress
 import json
 import xml.etree.ElementTree as ET
