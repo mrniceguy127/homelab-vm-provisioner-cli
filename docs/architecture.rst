@@ -47,6 +47,7 @@ Configuration
 - ``paths.vm_data_dir`` lets each VM config override its local artifact directory.
 - ``image`` settings in a VM config override the global guest image settings.
 - The default ``image.os_variant`` is ``generic`` to avoid host-specific libosinfo failures.
+- Both ``create`` and ``clone`` commands support reading configs from stdin when the config path is omitted, enabling database-driven and API-driven provisioning workflows.
 - VM networking policy is rendered into application-owned ``hvp_filter``, ``hvp_nat``, and ``hvp_bridge_filter`` nftables tables.
 - Same-bridge VM-to-VM traffic is filtered in the bridge family so same-subnet isolation works even when guests share one Linux bridge.
 - Relative ``paths.vm_data_dir`` values resolve from the project root.

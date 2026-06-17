@@ -293,6 +293,21 @@ class ParserAndMainTests(unittest.TestCase):
         destroy_mock.assert_not_called()
         ssh_admin_mock.assert_not_called()
 
+    def test_build_parser_accepts_no_config_for_stdin(self):
+        """Test that the parser accepts omitted config argument for stdin."""
+        parser = cli.build_parser()
+        args = parser.parse_args(["create"])
+
+        self.assertEqual(args.command, "create")
+        self.assertIsNone(args.config)
+
+    def test_main_dispatches_create_without_config_for_stdin(self):
+        """Test that main() dispatches create with None when no config provided."""
+        with patch.object(cli, "create") as create_mock:
+            cli.main(["create"])
+
+        create_mock.assert_called_once_with(None)
+
 
 class CreateTests(unittest.TestCase):
     def test_builds_nat_custom_network_from_subnet_prefix(self):
@@ -842,6 +857,224 @@ class CreateTests(unittest.TestCase):
 
         validate_mock.assert_called_once()
         save_state_mock.assert_not_called()
+
+    def test_create_with_stdin_config(self):
+        """Test that create command can accept config via stdin when no config argument provided."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            tenant_key = tmpdir_path / "tenant.pub"
+            tenant_key.write_text("ssh-ed25519 AAA tenant\n", encoding="utf-8")
+
+            config_data = {
+                "vm": {
+                    "name": "demo-stdin",
+                    "user": "tenant",
+                    "ssh_key_file": tenant_key.as_posix(),
+                    "ram_mb": 4096,
+                    "vcpus": 2,
+                    "disk_gb": 40,
+                    "allow_sudo": False,
+                    "trust": "untrusted",
+                    "template": "base",
+                },
+                "network": {
+                    "mode": "nat-auto",
+                },
+                "packages": ["htop"],
+                "ports": [{"host": 2222, "guest": 22}],
+            }
+
+            vm_data_dir = tmpdir_path / "vm" / "data" / "demo-stdin"
+            admin_key_dir = tmpdir_path / "vm" / "keys" / "admin"
+            admin_key = admin_key_dir / "demo-stdin_admin_ed25519"
+            global_config = {
+                "paths": {
+                    "vm_data_dir": "vm/data",
+                    "admin_key_dir": "vm/keys/admin",
+                    "user_key_dir": "vm/keys/users",
+                    "vm_state_dir": "vm/state",
+                }
+            }
+            image_settings = {
+                "name": "ubuntu-24.04.img",
+                "url": "https://example.invalid/images/ubuntu-24.04.img",
+                "os_variant": "ubuntu24.04",
+            }
+            dns_settings = {"resolvers": ("1.1.1.1", "1.0.0.1")}
+
+            with patch.object(cli, "require_tools"), patch.object(
+                cli, "load_global_config", return_value=global_config
+            ), patch.object(
+                cli, "load_config_from_stdin", return_value=config_data
+            ) as load_stdin_mock, patch.object(
+                cli, "vm_data_dir_for_config", return_value=vm_data_dir
+            ), patch.object(
+                cli, "default_admin_key_dir", return_value=admin_key_dir
+            ), patch.object(
+                cli,
+                "admin_keypair",
+                return_value=(admin_key, "ssh-ed25519 AAA admin"),
+            ), patch.object(
+                cli, "random_mac", return_value="52:54:00:aa:bb:cc"
+            ), patch.object(
+                cli, "run"
+            ), patch.object(
+                cli, "image_settings_for_config", return_value=image_settings
+            ), patch.object(
+                cli, "dns_settings_for_config", return_value=dns_settings
+            ), patch.object(
+                cli, "validate_os_variant"
+            ), patch.object(
+                cli, "ensure_base_image", return_value=Path("/images/ubuntu-24.04.img")
+            ), patch.object(
+                cli, "create_vm_disk", return_value=Path("/images/demo-stdin.qcow2")
+            ), patch.object(
+                cli, "create_nat_network"
+            ), patch.object(
+                cli,
+                "render_templates",
+                return_value=(Path("/build/user-data"), Path("/build/meta-data")),
+            ), patch.object(
+                cli, "save_vm_state"
+            ), patch.object(
+                cli, "create_seed_iso", return_value=Path("/images/demo-stdin-seed.iso")
+            ), patch.object(
+                cli, "virt_install"
+            ) as virt_install_mock, patch.object(
+                cli, "reconcile_networking"
+            ), patch.object(
+                cli, "pick_free_subnet",
+                return_value={
+                    "prefix": "192.168.120",
+                    "cidr": "192.168.120.0/24",
+                    "gateway": "192.168.120.1",
+                    "vm_ip": "192.168.120.50",
+                    "dhcp_start": "192.168.120.50",
+                    "dhcp_end": "192.168.120.99",
+                },
+            ):
+                cli.create(None)
+
+            # Verify stdin was read
+            load_stdin_mock.assert_called_once()
+            # Verify VM was created
+            virt_install_mock.assert_called_once()
+            self.assertEqual(virt_install_mock.call_args[0][0], "demo-stdin")
+
+
+class CloneWithStdinTests(unittest.TestCase):
+    def test_clone_with_stdin_config(self):
+        """Test that clone command can accept config via stdin when no config argument provided."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            tenant_key = tmpdir_path / "tenant.pub"
+            tenant_key.write_text("ssh-ed25519 AAA tenant\n", encoding="utf-8")
+
+            config_data = {
+                "vm": {
+                    "name": "demo-clone",
+                    "user": "tenant",
+                    "ssh_key_file": tenant_key.as_posix(),
+                    "ram_mb": 2048,
+                    "vcpus": 1,
+                    "disk_gb": 20,
+                    "allow_sudo": False,
+                    "trust": "untrusted",
+                    "template": "base",
+                },
+                "network": {
+                    "mode": "nat-auto",
+                },
+                "packages": ["vim"],
+            }
+
+            with patch.object(cli, "require_tools"), patch.object(
+                cli, "load_config_from_stdin", return_value=config_data
+            ) as load_stdin_mock, patch.object(
+                cli, "vm_exists", side_effect=[True, False, False]  # source exists, target doesn't (twice)
+            ), patch.object(
+                cli, "vm_disk_path", side_effect=[Path("/disk/source.qcow2"), Path("/disk/target.qcow2")]
+            ), patch.object(
+                cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
+            ), patch.object(
+                cli, "prepare_vm_definition", return_value={
+                    "vm_name": "demo-clone",
+                    "vm_user": "tenant",
+                    "trust": "untrusted",
+                    "network": {
+                        "mode": "nat-auto",
+                        "name": "demo-clone-net",
+                        "mac": "52:54:00:aa:bb:cc",
+                        "vm_ip": "192.168.120.50",
+                    },
+                    "ports": [],
+                    "resolved_config_path": "<stdin>",
+                    "state": {"vm_name": "demo-clone"},
+                    "vm": config_data["vm"],
+                    "image_settings": {"os_variant": "ubuntu24.04"},
+                    "admin_private_key": Path("/keys/admin"),
+                }
+            ), patch.object(
+                cli, "save_vm_state"
+            ), patch.object(
+                cli, "load_vm_state", return_value={"config_path": "/configs/source.yaml"}
+            ), patch.object(
+                cli, "load_config", return_value={"vm": {"user": "olduser"}}
+            ), patch.object(
+                cli, "stop_vm_domain", return_value=False
+            ), patch.object(
+                cli, "ensure_host_services"
+            ), patch.object(
+                cli, "copy_qcow2_image"
+            ), patch.object(
+                cli, "prepare_cloned_guest_disk"
+            ), patch.object(
+                cli, "create_nat_network"
+            ), patch.object(
+                cli, "render_seed_iso_for_definition", return_value=Path("/seed.iso")
+            ), patch.object(
+                cli, "virt_install"
+            ), patch.object(
+                cli, "reconcile_networking"
+            ), patch.object(
+                cli, "pick_free_subnet", return_value={}
+            ), patch("builtins.print"):
+                # Mock Path.exists() - source disk exists, target doesn't
+                with patch.object(Path, "exists", lambda p: str(p) == "/disk/source.qcow2"):
+                    cli.clone("source-vm", None)
+
+            # Verify stdin was read
+            load_stdin_mock.assert_called_once()
+
+    def test_clone_validates_required_vm_section(self):
+        """Test that clone raises error if config is missing 'vm' section."""
+        config_data = {"network": {"mode": "nat-auto"}}
+
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_config_from_stdin", return_value=config_data
+        ):
+            with self.assertRaisesRegex(ValueError, "Config must contain 'vm' section"):
+                cli.clone("source-vm", None)
+
+    def test_clone_validates_required_name_field(self):
+        """Test that clone raises error if config is missing 'vm.name' field."""
+        config_data = {"vm": {"user": "tenant"}}
+
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_config_from_stdin", return_value=config_data
+        ):
+            with self.assertRaisesRegex(ValueError, "Config 'vm' section must contain 'name' field"):
+                cli.clone("source-vm", None)
+
+    def test_clone_validates_required_user_field(self):
+        """Test that clone raises error if config is missing 'vm.user' field."""
+        config_data = {"vm": {"name": "demo"}}
+
+        with patch.object(cli, "require_tools"), patch.object(
+            cli, "load_config_from_stdin", return_value=config_data
+        ):
+            with self.assertRaisesRegex(ValueError, "Config 'vm' section must contain 'user' field"):
+                cli.clone("source-vm", None)
 
 
 class SnapshotRestoreTests(unittest.TestCase):

@@ -2,11 +2,11 @@
 
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import Mock, patch
 
-from homelab_vm_provisioner import cli, system
+from homelab_vm_provisioner import cli
+
 from .helpers import completed_process
-
 
 # Module-level patchers to prevent actual system calls
 _require_tools_patcher = None
@@ -710,8 +710,8 @@ class SnapshotCreateDetailedTests(unittest.TestCase):
         
         # Mock Path.exists and Path.mkdir
         with patch("pathlib.Path.exists") as mock_exists, \
-             patch("pathlib.Path.mkdir") as mock_mkdir, \
-             patch("pathlib.Path.write_text") as mock_write_text:
+             patch("pathlib.Path.mkdir"), \
+             patch("pathlib.Path.write_text"):
             
             mock_exists.return_value = True
             

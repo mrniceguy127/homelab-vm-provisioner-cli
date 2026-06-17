@@ -490,3 +490,90 @@ class StateFileTests(unittest.TestCase):
         self.assertEqual(loaded["config_path"], str(current_config_path))
 
 
+class LoadConfigFromStdinTests(unittest.TestCase):
+    """Tests for loading configuration from stdin or pipes."""
+
+    def test_load_config_from_stdin_with_valid_yaml(self):
+        """Test loading a valid YAML config from stdin."""
+        yaml_content = """
+vm:
+  name: demo
+  user: tenant
+  ram_mb: 4096
+  vcpus: 2
+  disk_gb: 40
+
+network:
+  mode: nat-auto
+
+packages:
+  - htop
+"""
+        with patch("sys.stdin", read=lambda: yaml_content.encode("utf-8")):
+            result = config.load_config_from_stdin()
+
+        self.assertEqual(result["vm"]["name"], "demo")
+        self.assertEqual(result["vm"]["user"], "tenant")
+        self.assertEqual(result["vm"]["ram_mb"], 4096)
+        self.assertEqual(result["network"]["mode"], "nat-auto")
+        self.assertEqual(result["packages"], ["htop"])
+
+    def test_load_config_from_stdin_with_buffer(self):
+        """Test loading config from a buffer-like stdin."""
+        import io
+
+        yaml_content = """
+vm:
+  name: test-vm
+  user: admin
+  ram_mb: 2048
+
+network:
+  mode: bridge
+  bridge_name: br0
+"""
+        stdin_buffer = io.StringIO(yaml_content)
+        with patch("sys.stdin", stdin_buffer):
+            result = config.load_config_from_stdin()
+
+        self.assertEqual(result["vm"]["name"], "test-vm")
+        self.assertEqual(result["vm"]["ram_mb"], 2048)
+        self.assertEqual(result["network"]["mode"], "bridge")
+        self.assertEqual(result["network"]["bridge_name"], "br0")
+
+    def test_load_config_from_stdin_raises_on_invalid_yaml(self):
+        """Test that invalid YAML raises an appropriate error."""
+        import io
+
+        invalid_yaml = """
+vm:
+  name: demo
+  invalid: [unclosed bracket
+"""
+        stdin_buffer = io.StringIO(invalid_yaml)
+        with patch("sys.stdin", stdin_buffer):
+            with self.assertRaises(Exception):  # yaml.YAMLError or similar
+                config.load_config_from_stdin()
+
+    def test_load_config_from_stdin_with_empty_input(self):
+        """Test that empty stdin raises or returns None."""
+        import io
+
+        stdin_buffer = io.StringIO("")
+        with patch("sys.stdin", stdin_buffer):
+            result = config.load_config_from_stdin()
+            # Empty YAML returns None
+            self.assertIsNone(result)
+
+    def test_load_config_from_stdin_with_minimal_config(self):
+        """Test loading minimal valid config from stdin."""
+        import io
+
+        yaml_content = "vm:\n  name: minimal\n"
+        stdin_buffer = io.StringIO(yaml_content)
+        with patch("sys.stdin", stdin_buffer):
+            result = config.load_config_from_stdin()
+
+        self.assertEqual(result["vm"]["name"], "minimal")
+
+
