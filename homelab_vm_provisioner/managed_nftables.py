@@ -44,6 +44,21 @@ def current_tables():
     }
 
 
+def _render_set_block(set_spec):
+    """Render one named nftables set block."""
+
+    lines = [
+        f"    set {set_spec['name']} {{",
+        f"        type {set_spec['type']}",
+    ]
+    if set_spec.get("flags"):
+        lines.append(f"        flags {', '.join(set_spec['flags'])}")
+    if set_spec.get("elements"):
+        lines.append(f"        elements = {{ {', '.join(set_spec['elements'])} }}")
+    lines.append("    }")
+    return lines
+
+
 def render_ruleset(plan, previous_tables=None):
     """Render one atomic nft batch script for the managed tables."""
 
@@ -63,6 +78,7 @@ def render_ruleset(plan, previous_tables=None):
     lines.extend(
         [
             f"table {FILTER_TABLE['family']} {FILTER_TABLE['name']} {{",
+            *sum([_render_set_block(set_spec) + [""] for set_spec in plan.get("filter_sets", [])], []),
             "    chain forward {",
             "        type filter hook forward priority -10; policy accept;",
             *[f"        {rule}" for rule in plan["filter_rules"]["forward"]],
@@ -75,6 +91,7 @@ def render_ruleset(plan, previous_tables=None):
             "}",
             "",
             f"table {NAT_TABLE['family']} {NAT_TABLE['name']} {{",
+            *sum([_render_set_block(set_spec) + [""] for set_spec in plan.get("nat_sets", [])], []),
             "    chain prerouting {",
             "        type nat hook prerouting priority dstnat; policy accept;",
             *[f"        {rule}" for rule in plan["nat_rules"]["prerouting"]],
@@ -87,6 +104,7 @@ def render_ruleset(plan, previous_tables=None):
             "}",
             "",
             f"table {BRIDGE_FILTER_TABLE['family']} {BRIDGE_FILTER_TABLE['name']} {{",
+            *sum([_render_set_block(set_spec) + [""] for set_spec in plan.get("bridge_filter_sets", [])], []),
             "    chain forward {",
             "        type filter hook forward priority -10; policy accept;",
             *[f"        {rule}" for rule in plan["bridge_filter_rules"]["forward"]],

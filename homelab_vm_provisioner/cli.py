@@ -26,18 +26,15 @@ from .config import (
     load_vm_state,
     resolve_config_path,
     resolve_setup_script_path,
+    resolve_state_artifact_path,
     resolve_user_key_path,
     save_vm_state,
     state_file_for_vm,
     vm_data_dir_for_config,
 )
 from .constants import ADMIN_USER
-from .core import (
-    validate_nat_custom_network as core_validate_nat_custom_network,
-)
-from .core import (
-    validate_vm_name_length,
-)
+from .core import validate_nat_custom_network as core_validate_nat_custom_network
+from .core import validate_vm_name_length
 from .network import discover_vm_network, pick_free_subnet, random_mac, resolve_vm_ipv4
 from .provision import (
     admin_keypair,
@@ -855,7 +852,7 @@ def snapshot_create(vm_name):
             if state_path.exists():
                 copy_local_file(state_path, snapshot_path / "state.yaml")
 
-            vm_data_dir = Path(
+            vm_data_dir = resolve_state_artifact_path(
                 state.get("vm_data_dir")
                 or vm_data_dir_for_config(vm_name, config_data, global_config=global_config)
             )
@@ -864,7 +861,7 @@ def snapshot_create(vm_name):
 
             admin_private_key = state.get("admin_private_key")
             if admin_private_key:
-                admin_key_path = Path(admin_private_key)
+                admin_key_path = resolve_state_artifact_path(admin_private_key)
                 if admin_key_path.exists():
                     copy_local_file(admin_key_path, snapshot_path / "keys" / admin_key_path.name)
                 admin_pub_path = Path(str(admin_key_path) + ".pub")
@@ -947,24 +944,30 @@ def snapshot_restore(vm_name, snapshot_id):
             copy_image_artifact(snapshot_seed, seed_iso_path(vm_name))
 
         original_paths = metadata.get("original_paths") or {}
-        target_config_path = Path(original_paths.get("config_path") or restored_config_path)
+        target_config_path = resolve_state_artifact_path(
+            original_paths.get("config_path") or restored_config_path
+        )
         copy_local_file(restored_config_path, target_config_path)
 
         if restored_state_path.exists():
-            target_state_path = Path(
+            target_state_path = resolve_state_artifact_path(
                 original_paths.get("state_path") or state_file_for_vm(vm_name)
             )
             copy_local_file(restored_state_path, target_state_path)
 
         restored_state = load_vm_state(vm_name)
-        restored_vm_data_dir = Path(restored_state.get("vm_data_dir") or "") if restored_state else None
+        restored_vm_data_dir = (
+            resolve_state_artifact_path(restored_state.get("vm_data_dir"))
+            if restored_state and restored_state.get("vm_data_dir")
+            else None
+        )
         snapshot_vm_data_dir = snapshot_path / "vm-data"
         if restored_vm_data_dir and snapshot_vm_data_dir.exists():
             copy_local_tree(snapshot_vm_data_dir, restored_vm_data_dir)
 
         restored_admin_key = restored_state.get("admin_private_key") if restored_state else None
         if restored_admin_key:
-            admin_key_path = Path(restored_admin_key)
+            admin_key_path = resolve_state_artifact_path(restored_admin_key)
             snapshot_key_path = snapshot_path / "keys" / admin_key_path.name
             snapshot_pub_path = snapshot_path / "keys" / f"{admin_key_path.name}.pub"
             if snapshot_key_path.exists():
@@ -1101,8 +1104,14 @@ def clone(source_vm_name, config_path=None):
             source_state = load_vm_state(source_vm_name)
             source_config_path = source_state.get("config_path")
             source_vm_user = None
-            if source_config_path and Path(source_config_path).exists():
-                source_vm_user = load_config(source_config_path).get("vm", {}).get("user")
+            if source_config_path:
+                try:
+                    resolved_source_config_path = resolve_config_path(source_config_path)
+                except FileNotFoundError:
+                    resolved_source_config_path = None
+
+                if resolved_source_config_path and resolved_source_config_path.exists():
+                    source_vm_user = load_config(resolved_source_config_path).get("vm", {}).get("user")
 
             source_was_running = False
             try:
@@ -1187,7 +1196,7 @@ def ssh_admin(vm_name, vm_ip=None):
     global_config = load_global_config()
     state = load_vm_state(vm_name)
     if state.get("admin_private_key"):
-        admin_private_key = Path(state["admin_private_key"])
+        admin_private_key = resolve_state_artifact_path(state["admin_private_key"])
     else:
         admin_private_key = admin_private_key_path(
             vm_name,

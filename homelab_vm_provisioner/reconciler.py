@@ -5,12 +5,22 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from .config import default_vm_state_root, load_config, load_global_config, load_vm_state
-from .constants import BLOCKED_PRIVATE_RANGES, PROJECT_DIR
+from .config import (
+    default_config_file_for_vm,
+    default_vm_state_root,
+    load_config,
+    load_global_config,
+    load_vm_state,
+)
+from .constants import BLOCKED_PRIVATE_RANGES
 from .core import normalize_network_profile as core_normalize_network_profile
 from .managed_nftables import apply_ruleset as apply_managed_nftables_ruleset
 from .managed_nftables import verify_tables as verify_managed_nftables_tables
-from .provision import bridge_interface_exists, cleanup_bridge_interface
+from .provision import (
+    bridge_interface_exists,
+    cleanup_bridge_interface,
+    ensure_libvirt_network_active,
+)
 from .system import capture_or_none, run
 
 
@@ -59,7 +69,7 @@ def normalize_network_profile(network):
 
 def configured_vm_records():
     """Load desired VM networking records from saved VM configs and runtime state."""
-    config_root = PROJECT_DIR / "configs"
+    config_root = default_config_file_for_vm("placeholder").parent
     if not config_root.exists():
         return []
 
@@ -215,6 +225,66 @@ def _sorted_enabled_ports(ports):
     )
 
 
+def _nft_identifier(value):
+    """Convert an arbitrary label into a stable nftables identifier."""
+
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in str(value).strip().lower())
+    normalized = normalized.strip("_") or "set"
+    if normalized[0].isdigit():
+        normalized = f"s_{normalized}"
+    return normalized
+
+
+def _sorted_ipv4_addresses(values):
+    unique_values = {str(value).strip() for value in values if str(value).strip()}
+    return [str(value) for value in sorted(unique_values, key=ipaddress.ip_address)]
+
+
+def _sorted_ipv4_networks(values):
+    unique_networks = {
+        str(ipaddress.ip_network(str(value).strip(), strict=False))
+        for value in values
+        if str(value).strip()
+    }
+    return [
+        str(value)
+        for value in sorted(
+            unique_networks,
+            key=lambda item: (
+                int(ipaddress.ip_network(item, strict=False).network_address),
+                ipaddress.ip_network(item, strict=False).prefixlen,
+            ),
+        )
+    ]
+
+
+def _sorted_service_tuples(values):
+    return [
+        f"{ip_address} . {service_port}"
+        for ip_address, service_port in sorted(
+            values,
+            key=lambda item: (int(ipaddress.ip_address(item[0])), int(item[1])),
+        )
+    ]
+
+
+def _append_nft_set(plan, table_key, name, set_type, elements, flags=None):
+    """Append one deterministic set definition when it has elements."""
+
+    if not elements:
+        return None
+
+    plan[f"{table_key}_sets"].append(
+        {
+            "name": name,
+            "type": set_type,
+            "elements": elements,
+            "flags": flags or [],
+        }
+    )
+    return name
+
+
 def build_nftables_plan(network_groups, live_vm_records, global_config=None):
     """Build the desired application-owned nftables tables."""
 
@@ -223,20 +293,23 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
 
     plan = {
         "backend": "nftables",
-        "managed_subnets": [
+        "managed_subnets": _sorted_ipv4_networks(
             group["subnet_cidr"] for group in network_groups if group.get("subnet_cidr")
-        ],
-        "managed_vm_ips": [
+        ),
+        "managed_vm_ips": _sorted_ipv4_addresses(
             record["ip_address"] for record in live_vm_records if record.get("ip_address")
-        ],
+        ),
+        "filter_sets": [],
         "filter_rules": {
             "forward": [],
             "input": [],
         },
+        "nat_sets": [],
         "nat_rules": {
             "prerouting": [],
             "postrouting": [],
         },
+        "bridge_filter_sets": [],
         "bridge_filter_rules": {
             "forward": [],
         },
@@ -250,38 +323,164 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
     }
     subnet_group_list = list(subnet_groups.values())
 
-    for vm in sorted(
-        live_vm_records,
-        key=lambda item: (item.get("network_group_id") or "", item.get("vm_name") or ""),
-    ):
-        group = subnet_groups.get(vm.get("network_group_id"))
-        bridge_name = (group or {}).get("bridge_name")
-        gateway_ip = (group or {}).get("gateway_ip")
-        vm_ip = vm.get("ip_address")
-        if group is None or not bridge_name or not gateway_ip or not vm_ip:
+    _append_nft_set(
+        plan,
+        "filter",
+        "managed_vm_ipv4",
+        "ipv4_addr",
+        _sorted_ipv4_addresses(plan["managed_vm_ips"]),
+    )
+    _append_nft_set(
+        plan,
+        "filter",
+        "managed_subnets_ipv4",
+        "ipv4_addr",
+        _sorted_ipv4_networks(plan["managed_subnets"]),
+        flags=["interval"],
+    )
+    private_lan_set = _append_nft_set(
+        plan,
+        "filter",
+        "private_lan_ipv4",
+        "ipv4_addr",
+        _sorted_ipv4_networks(blocked_private_targets),
+        flags=["interval"],
+    )
+    gateway_udp_ports = _append_nft_set(
+        plan,
+        "filter",
+        "gateway_udp_service_ports",
+        "inet_service",
+        ["53", "67"],
+    )
+    gateway_tcp_ports = _append_nft_set(
+        plan,
+        "filter",
+        "gateway_tcp_service_ports",
+        "inet_service",
+        ["53"],
+    )
+
+    dnat_service_sets = {"tcp": set(), "udp": set()}
+
+    for group in subnet_group_list:
+        bridge_name = group.get("bridge_name")
+        gateway_ip = group.get("gateway_ip")
+        subnet_cidr = group.get("subnet_cidr")
+        if not bridge_name or not gateway_ip or not subnet_cidr:
             continue
 
-        input_comment_prefix = f"{vm['vm_name']} host"
-        plan["filter_rules"]["input"].append(
-            _nft_rule(
-                [
-                    "iifname",
-                    _nft_string(bridge_name),
-                    "ip",
-                    "saddr",
-                    vm_ip,
-                    "ip",
-                    "daddr",
-                    gateway_ip,
-                    "udp",
-                    "dport",
-                    "67",
-                    "accept",
-                ],
-                comment=f"{input_comment_prefix} dhcp",
-            )
+        group_vms = [
+            vm
+            for vm in sorted(live_vm_records, key=lambda item: item.get("vm_name") or "")
+            if vm.get("network_group_id") == group["id"] and vm.get("ip_address")
+        ]
+        if not group_vms:
+            continue
+
+        set_prefix = _nft_identifier(bridge_name)
+        all_vm_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(vm["ip_address"] for vm in group_vms),
         )
-        for proto in ("udp", "tcp"):
+        host_allow_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_host_allow_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("allow_host_access", True)
+            ),
+        )
+        host_reject_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_host_reject_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("allow_host_access", True) is False
+            ),
+        )
+        same_group_allow_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_same_group_allow_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("allow_same_group_traffic", True)
+            ),
+        )
+        same_group_reject_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_same_group_reject_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("allow_same_group_traffic", True) is False
+            ),
+        )
+        private_allow_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_private_lan_allow_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("allow_private_lan_access")
+            ),
+        )
+        private_reject_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_private_lan_reject_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if not vm.get("allow_private_lan_access")
+            ),
+        )
+        internet_reject_set = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_internet_reject_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("internet_access", True) is False
+            ),
+        )
+        cross_group_targets = _append_nft_set(
+            plan,
+            "filter",
+            f"{set_prefix}_cross_group_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_networks(
+                other_group["subnet_cidr"]
+                for other_group in subnet_group_list
+                if other_group["id"] != group["id"]
+            ),
+            flags=["interval"],
+        )
+        bridge_same_group_allow_set = _append_nft_set(
+            plan,
+            "bridge_filter",
+            f"{set_prefix}_same_group_allow_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("allow_same_group_traffic", True)
+            ),
+        )
+        bridge_same_group_reject_set = _append_nft_set(
+            plan,
+            "bridge_filter",
+            f"{set_prefix}_same_group_reject_vm_ipv4",
+            "ipv4_addr",
+            _sorted_ipv4_addresses(
+                vm["ip_address"] for vm in group_vms if vm.get("allow_same_group_traffic", True) is False
+            ),
+        )
+
+        if all_vm_set and gateway_udp_ports:
             plan["filter_rules"]["input"].append(
                 _nft_rule(
                     [
@@ -289,19 +488,19 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
                         _nft_string(bridge_name),
                         "ip",
                         "saddr",
-                        vm_ip,
+                        f"@{all_vm_set}",
                         "ip",
                         "daddr",
                         gateway_ip,
-                        proto,
+                        "udp",
                         "dport",
-                        "53",
+                        f"@{gateway_udp_ports}",
                         "accept",
                     ],
-                    comment=f"{input_comment_prefix} dns-{proto}",
+                    comment=f"{group['id']} host udp services",
                 )
             )
-        if vm.get("allow_host_access", True) is False:
+        if all_vm_set and gateway_tcp_ports:
             plan["filter_rules"]["input"].append(
                 _nft_rule(
                     [
@@ -309,10 +508,30 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
                         _nft_string(bridge_name),
                         "ip",
                         "saddr",
-                        vm_ip,
+                        f"@{all_vm_set}",
+                        "ip",
+                        "daddr",
+                        gateway_ip,
+                        "tcp",
+                        "dport",
+                        f"@{gateway_tcp_ports}",
+                        "accept",
+                    ],
+                    comment=f"{group['id']} host tcp services",
+                )
+            )
+        if host_reject_set:
+            plan["filter_rules"]["input"].append(
+                _nft_rule(
+                    [
+                        "iifname",
+                        _nft_string(bridge_name),
+                        "ip",
+                        "saddr",
+                        f"@{host_reject_set}",
                         "ct state established,related accept",
                     ],
-                    comment=f"{input_comment_prefix} reject (let host in)",
+                    comment=f"{group['id']} host reject (let host in)",
                 )
             )
             plan["filter_rules"]["input"].append(
@@ -322,13 +541,13 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
                         _nft_string(bridge_name),
                         "ip",
                         "saddr",
-                        vm_ip,
+                        f"@{host_reject_set}",
                         "reject",
                     ],
-                    comment=f"{input_comment_prefix} reject",
+                    comment=f"{group['id']} host reject",
                 )
             )
-        else:
+        if host_allow_set:
             plan["filter_rules"]["input"].append(
                 _nft_rule(
                     [
@@ -336,10 +555,10 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
                         _nft_string(bridge_name),
                         "ip",
                         "saddr",
-                        vm_ip,
+                        f"@{host_allow_set}",
                         "accept",
                     ],
-                    comment=f"{input_comment_prefix} accept",
+                    comment=f"{group['id']} host accept",
                 )
             )
             plan["filter_rules"]["forward"].append(
@@ -349,17 +568,158 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
                         _nft_string(bridge_name),
                         "ip",
                         "saddr",
-                        vm_ip,
+                        f"@{host_allow_set}",
                         "ip",
                         "daddr",
                         gateway_ip,
                         "accept",
                     ],
-                    comment=f"{input_comment_prefix} accept (allow vm access to host)",
+                    comment=f"{group['id']} allow vm access to host",
                 )
             )
-            
+        if bridge_same_group_allow_set:
+            plan["bridge_filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "ether",
+                        "type",
+                        "ip",
+                        "ip",
+                        "saddr",
+                        f"@{bridge_same_group_allow_set}",
+                        "ip",
+                        "daddr",
+                        subnet_cidr,
+                        "accept",
+                    ],
+                    comment=f"{group['id']} same-bridge allow",
+                )
+            )
+        if same_group_allow_set:
+            plan["filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "iifname",
+                        _nft_string(bridge_name),
+                        "ip",
+                        "saddr",
+                        f"@{same_group_allow_set}",
+                        "ip",
+                        "daddr",
+                        subnet_cidr,
+                        "accept",
+                    ],
+                    comment=f"{group['id']} allow same group traffic",
+                )
+            )
+        if bridge_same_group_reject_set:
+            plan["bridge_filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "ether",
+                        "type",
+                        "ip",
+                        "ip",
+                        "saddr",
+                        f"@{bridge_same_group_reject_set}",
+                        "ip",
+                        "daddr",
+                        subnet_cidr,
+                        "drop",
+                    ],
+                    comment=f"{group['id']} same-bridge drop",
+                )
+            )
+        if same_group_reject_set:
+            plan["filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "iifname",
+                        _nft_string(bridge_name),
+                        "ip",
+                        "saddr",
+                        f"@{same_group_reject_set}",
+                        "ip",
+                        "daddr",
+                        subnet_cidr,
+                        "reject",
+                    ],
+                    comment=f"{group['id']} reject same group traffic",
+                )
+            )
+        if all_vm_set and cross_group_targets:
+            plan["filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "iifname",
+                        _nft_string(bridge_name),
+                        "ip",
+                        "saddr",
+                        f"@{all_vm_set}",
+                        "ip",
+                        "daddr",
+                        f"@{cross_group_targets}",
+                        "reject",
+                    ],
+                    comment=f"{group['id']} cross-group reject",
+                )
+            )
+        if private_lan_set and private_allow_set:
+            plan["filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "iifname",
+                        _nft_string(bridge_name),
+                        "ip",
+                        "saddr",
+                        f"@{private_allow_set}",
+                        "ip",
+                        "daddr",
+                        f"@{private_lan_set}",
+                        "accept",
+                    ],
+                    comment=f"{group['id']} private-lan allow",
+                )
+            )
+        if private_lan_set and private_reject_set:
+            plan["filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "iifname",
+                        _nft_string(bridge_name),
+                        "ip",
+                        "saddr",
+                        f"@{private_reject_set}",
+                        "ip",
+                        "daddr",
+                        f"@{private_lan_set}",
+                        "reject",
+                    ],
+                    comment=f"{group['id']} private-lan reject",
+                )
+            )
+        if internet_reject_set:
+            plan["filter_rules"]["forward"].append(
+                _nft_rule(
+                    [
+                        "iifname",
+                        _nft_string(bridge_name),
+                        "ip",
+                        "saddr",
+                        f"@{internet_reject_set}",
+                        "reject",
+                    ],
+                    comment=f"{group['id']} internet reject",
+                )
+            )
 
+    for vm in sorted(
+        live_vm_records,
+        key=lambda item: (item.get("network_group_id") or "", item.get("vm_name") or ""),
+    ):
+        vm_ip = vm.get("ip_address")
+        if not vm_ip:
+            continue
 
         for port in _sorted_enabled_ports(vm.get("ports") or []):
             nat_comment = f"{vm['vm_name']} port-forward {port['host']}->{port['guest']}/{port['proto']}"
@@ -376,165 +736,53 @@ def build_nftables_plan(network_groups, live_vm_records, global_config=None):
                     comment=nat_comment,
                 )
             )
-            plan["filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "ct",
-                        "status",
-                        "dnat",
-                        "ip",
-                        "daddr",
-                        vm_ip,
-                        port["proto"],
-                        "dport",
-                        str(port["guest"]),
-                        "accept",
-                    ],
-                    comment=nat_comment,
-                )
-            )
-            plan["filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "ct",
-                        "status",
-                        "dnat",
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        port["proto"],
-                        "sport",
-                        str(port["guest"]),
-                        "accept",
-                    ],
-                    comment=f"{nat_comment} return",
-                )
-            )
+            dnat_service_sets[port["proto"]].add((vm_ip, int(port["guest"])))
 
-        if vm.get("allow_same_group_traffic", True):
-            plan["bridge_filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "ether",
-                        "type",
-                        "ip",
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        "ip",
-                        "daddr",
-                        group["subnet_cidr"],
-                        "accept",
-                    ],
-                    comment=f"{vm['vm_name']} same-bridge allow",
-                )
-            )
-            plan["filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "iifname",
-                        _nft_string(bridge_name),
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        "ip",
-                        "daddr",
-                        group["subnet_cidr"],
-                        "accept",
-                    ],
-                    comment=f"{input_comment_prefix} accept (allow same group traffic)",
-                )
-            )
-        else:
-            plan["bridge_filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "ether",
-                        "type",
-                        "ip",
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        "ip",
-                        "daddr",
-                        group["subnet_cidr"],
-                        "drop",
-                    ],
-                    comment=f"{vm['vm_name']} same-bridge drop",
-                )
-            )
-            plan["filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "iifname",
-                        _nft_string(bridge_name),
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        "ip",
-                        "daddr",
-                        group["subnet_cidr"],
-                        "reject",
-                    ],
-                    comment=f"{input_comment_prefix} reject (reject same group traffic)",
-                )
-            )
+    for proto, service_pairs in sorted(dnat_service_sets.items()):
+        set_name = _append_nft_set(
+            plan,
+            "filter",
+            f"vm_{proto}_services",
+            "ipv4_addr . inet_service",
+            _sorted_service_tuples(service_pairs),
+        )
+        if not set_name:
+            continue
 
-        for other_group in subnet_group_list:
-            if other_group["id"] == group["id"]:
-                continue
-            plan["filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "iifname",
-                        _nft_string(bridge_name),
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        "ip",
-                        "daddr",
-                        other_group["subnet_cidr"],
-                        "reject",
-                    ],
-                    comment=f"{vm['vm_name']} cross-group reject {other_group['id']}",
-                )
+        plan["filter_rules"]["forward"].append(
+            _nft_rule(
+                [
+                    "ct",
+                    "status",
+                    "dnat",
+                    "ip",
+                    "daddr",
+                    ".",
+                    proto,
+                    "dport",
+                    f"@{set_name}",
+                    "accept",
+                ],
+                comment=f"managed {proto} port-forwards",
             )
-
-        private_lan_verdict = "accept" if vm.get("allow_private_lan_access") else "reject"
-        for private_target in blocked_private_targets:
-            plan["filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "iifname",
-                        _nft_string(bridge_name),
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        "ip",
-                        "daddr",
-                        private_target,
-                        private_lan_verdict,
-                    ],
-                    comment=(
-                        f"{vm['vm_name']} private-lan {'allow' if private_lan_verdict == 'accept' else 'reject'}"
-                    ),
-                )
+        )
+        plan["filter_rules"]["forward"].append(
+            _nft_rule(
+                [
+                    "ct",
+                    "status",
+                    "dnat",
+                    "ip",
+                    "saddr",
+                    ".",
+                    proto,
+                    "sport",
+                    f"@{set_name}",
+                    "accept",
+                ],
+                comment=f"managed {proto} port-forwards return",
             )
-
-        if vm.get("internet_access", True) is False:
-            plan["filter_rules"]["forward"].append(
-                _nft_rule(
-                    [
-                        "iifname",
-                        _nft_string(bridge_name),
-                        "ip",
-                        "saddr",
-                        vm_ip,
-                        "reject",
-                    ],
-                    comment=f"{vm['vm_name']} internet reject",
-                )
-            )
+        )
 
     return plan
 
@@ -824,13 +1072,11 @@ def ensure_libvirt_network(network_group, vm_records, allow_destructive=False):
         return _network_plan_summary(plan)
 
     if plan["action"] == "none":
-        _run_logged_network_command(["virsh", "net-autostart", network_name], network_name, check=False)
-        _run_logged_network_command(["virsh", "net-start", network_name], network_name, check=False)
+        ensure_libvirt_network_active(network_name, bridge_name=network_group.get("bridge_name"))
         return _network_plan_summary(plan)
 
     if plan["action"] == "update-hosts":
-        _run_logged_network_command(["virsh", "net-autostart", network_name], network_name, check=False)
-        _run_logged_network_command(["virsh", "net-start", network_name], network_name, check=False)
+        ensure_libvirt_network_active(network_name, bridge_name=network_group.get("bridge_name"))
         for host_spec in plan["host_updates"]["remove"]:
             _run_logged_net_update(network_name, "delete", host_spec)
         for host_spec in plan["host_updates"]["add"]:
@@ -847,8 +1093,7 @@ def ensure_libvirt_network(network_group, vm_records, allow_destructive=False):
     xml_path = Path("/tmp") / f"{network_name}.xml"
     xml_path.write_text(plan["desired_xml"], encoding="utf-8")
     _run_logged_network_command(["virsh", "net-define", str(xml_path)], network_name)
-    _run_logged_network_command(["virsh", "net-autostart", network_name], network_name)
-    _run_logged_network_command(["virsh", "net-start", network_name], network_name, check=False)
+    ensure_libvirt_network_active(network_name, bridge_name=network_group.get("bridge_name"))
     return _network_plan_summary(plan)
 
 

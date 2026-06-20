@@ -184,7 +184,8 @@ class IntegrationTests(unittest.TestCase):
         if image_overrides:
             image.update(image_overrides)
 
-        (root_dir / "vmctl.yaml").write_text(
+        (root_dir / "data" / "vmctl.yaml").parent.mkdir(parents=True, exist_ok=True)
+        (root_dir / "data" / "vmctl.yaml").write_text(
             textwrap.dedent(
                 f"""\
                 paths:
@@ -215,7 +216,7 @@ class IntegrationTests(unittest.TestCase):
         vm_data_dir=None,
         image_config=None,
     ):
-        config_path = root_dir / "configs" / "demo.yaml"
+        config_path = root_dir / "data" / "configs" / "demo.yaml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
             "vm:",
@@ -267,9 +268,8 @@ class IntegrationTests(unittest.TestCase):
         )
         stack.enter_context(patch.object(cli, "run", side_effect=host.cli_run))
         stack.enter_context(patch.object(config, "PROJECT_DIR", root_dir))
-        stack.enter_context(patch.object(config, "GLOBAL_CONFIG_PATH", root_dir / "vmctl.yaml"))
+        stack.enter_context(patch.object(config, "GLOBAL_CONFIG_PATH", root_dir / "data" / "vmctl.yaml"))
         stack.enter_context(patch.object(config, "LEGACY_VM_BUILD_DIR", root_dir / ".build"))
-        stack.enter_context(patch.object(reconciler, "PROJECT_DIR", root_dir))
         stack.enter_context(patch.object(provision, "IMG_DIR", img_dir))
         stack.enter_context(patch.object(provision, "run", side_effect=host.provision_run))
         stack.enter_context(patch("subprocess.run", side_effect=host.subprocess_run))
@@ -304,7 +304,7 @@ class IntegrationTests(unittest.TestCase):
                     "os_variant": "ubuntu24.04",
                 },
             )
-            self.write_user_key(root_dir, Path("custom/keys/users"))
+            self.write_user_key(root_dir, Path("data/custom/keys/users"))
             config_path = self.write_nat_config(root_dir)
             host = FakeHost()
 
@@ -312,9 +312,9 @@ class IntegrationTests(unittest.TestCase):
 
             cli.main(["create", str(config_path)])
 
-            vm_data_dir = root_dir / "custom" / "vm-data" / "demo"
-            state_file = root_dir / "custom" / "vm-state" / "demo.yaml"
-            admin_private_key = root_dir / "custom" / "keys" / "admin" / "demo_admin_ed25519"
+            vm_data_dir = root_dir / "data" / "custom" / "vm-data" / "demo"
+            state_file = root_dir / "data" / "custom" / "vm-state" / "demo.yaml"
+            admin_private_key = root_dir / "data" / "custom" / "keys" / "admin" / "demo_admin_ed25519"
             state = config.load_vm_state("demo")
             user_data_path = vm_data_dir / "user-data"
             meta_data_path = vm_data_dir / "meta-data"
@@ -378,7 +378,9 @@ class IntegrationTests(unittest.TestCase):
             )
             self.assertIn('tcp dport 2222 dnat to 192.168.240.50:22', host.applied_nft_rulesets[-1])
             self.assertIn('tcp dport 8080 dnat to 192.168.240.50:80', host.applied_nft_rulesets[-1])
-            self.assertIn('ct status dnat ip daddr 192.168.240.50 tcp dport 22 accept', host.applied_nft_rulesets[-1])
+            self.assertIn('set vm_tcp_services {', host.applied_nft_rulesets[-1])
+            self.assertIn('elements = { 192.168.240.50 . 22, 192.168.240.50 . 80 }', host.applied_nft_rulesets[-1])
+            self.assertIn('ct status dnat ip daddr . tcp dport @vm_tcp_services accept', host.applied_nft_rulesets[-1])
             self.assertIn("demo", host.vm_names)
 
             cli.main(["destroy", "demo"])
@@ -404,7 +406,7 @@ class IntegrationTests(unittest.TestCase):
             root_dir = Path(tmpdir)
             img_dir = root_dir / "images"
             self.write_global_config(root_dir)
-            self.write_user_key(root_dir, Path("vm/keys/users"))
+            self.write_user_key(root_dir, Path("data/vm/keys/users"))
             vm_data_dir = root_dir / "custom-vm-data" / "demo"
             config_path = self.write_nat_config(
                 root_dir,
@@ -424,7 +426,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(state["vm_data_dir"], str(vm_data_dir))
             self.assertEqual(
                 state["admin_private_key"],
-                str(root_dir / "vm" / "keys" / "admin" / "demo_admin_ed25519"),
+                str(root_dir / "data" / "vm" / "keys" / "admin" / "demo_admin_ed25519"),
             )
             self.assertIn(
                 (
@@ -478,7 +480,7 @@ class IntegrationTests(unittest.TestCase):
                 [[
                     "ssh",
                     "-i",
-                    str(root_dir / "vm" / "keys" / "admin" / "demo_admin_ed25519"),
+                    str(root_dir / "data" / "vm" / "keys" / "admin" / "demo_admin_ed25519"),
                     "-o",
                     "IdentitiesOnly=yes",
                     "vmadmin@192.168.240.50",
@@ -497,7 +499,7 @@ class IntegrationTests(unittest.TestCase):
 
             cli.main(["create", str(config_path)])
 
-            user_data_path = root_dir / "vm" / "data" / "demo" / "user-data"
+            user_data_path = root_dir / "data" / "vm" / "data" / "demo" / "user-data"
             rendered = user_data_path.read_text(encoding="utf-8")
 
         self.assertIn("- name: tenant", rendered)

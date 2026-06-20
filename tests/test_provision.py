@@ -319,6 +319,43 @@ class LibvirtProvisionTests(unittest.TestCase):
             check=False,
         )
 
+    def test_libvirt_network_is_active_detects_active_network(self):
+        with patch.object(
+            provision,
+            "capture_or_none",
+            return_value="Name: demo-net\nActive: yes\nAutostart: yes\n",
+        ):
+            self.assertTrue(provision.libvirt_network_is_active("demo-net"))
+
+    def test_ensure_libvirt_network_active_retries_after_stale_bridge_cleanup(self):
+        with patch.object(provision, "run") as run_mock, patch.object(
+            provision, "libvirt_network_is_active", side_effect=[False, True]
+        ), patch.object(
+            provision, "bridge_interface_exists", return_value=True
+        ), patch.object(
+            provision, "cleanup_bridge_interface"
+        ) as cleanup_mock:
+            provision.ensure_libvirt_network_active("demo-net", bridge_name="virbr-demo")
+
+        self.assertEqual(
+            run_mock.call_args_list,
+            [
+                call(["virsh", "net-autostart", "demo-net"], sudo=True, check=False),
+                call(["virsh", "net-start", "demo-net"], sudo=True, check=False),
+                call(["virsh", "net-start", "demo-net"], sudo=True, check=False),
+            ],
+        )
+        cleanup_mock.assert_called_once_with("virbr-demo")
+
+    def test_ensure_libvirt_network_active_raises_when_network_stays_inactive(self):
+        with patch.object(provision, "run"), patch.object(
+            provision, "libvirt_network_is_active", return_value=False
+        ), patch.object(
+            provision, "bridge_interface_exists", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed to become active"):
+                provision.ensure_libvirt_network_active("demo-net", bridge_name="virbr-demo")
+
     def test_os_variant_supported_returns_true_when_variant_is_listed(self):
         output = "short-id | name\ngeneric | Generic\nubuntu24.04 | Ubuntu 24.04\n"
 
@@ -392,6 +429,8 @@ class LibvirtProvisionTests(unittest.TestCase):
                 provision.subprocess,
                 "run",
                 side_effect=fake_subprocess_run,
+            ), patch.object(
+                provision, "libvirt_network_is_active", return_value=True
             ), patch.object(provision, "run") as run_mock:
                 provision.create_nat_network(
                     "demo",
@@ -412,8 +451,8 @@ class LibvirtProvisionTests(unittest.TestCase):
                 run_mock.call_args_list,
                 [
                     call(["virsh", "net-define", str(fake_xml_path)], sudo=True),
-                    call(["virsh", "net-autostart", "demo-net"], sudo=True),
-                    call(["virsh", "net-start", "demo-net"], sudo=True),
+                    call(["virsh", "net-autostart", "demo-net"], sudo=True, check=False),
+                    call(["virsh", "net-start", "demo-net"], sudo=True, check=False),
                 ],
             )
 
@@ -428,6 +467,8 @@ class LibvirtProvisionTests(unittest.TestCase):
             provision.subprocess,
             "run",
             return_value=type("Result", (), {"returncode": 0})(),
+            ), patch.object(
+                provision, "libvirt_network_is_active", return_value=True
             ), patch.object(provision, "run") as run_mock:
                 provision.create_nat_network(
                     "demo",
@@ -442,6 +483,38 @@ class LibvirtProvisionTests(unittest.TestCase):
                 )
 
         run_mock.assert_not_called()
+
+    def test_create_nat_network_reactivates_existing_inactive_network(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def fake_path(path_str):
+                if path_str == "/tmp":
+                    return Path(tmpdir)
+                return Path(path_str)
+
+            with patch.object(provision, "Path", side_effect=fake_path), patch.object(
+                provision.subprocess,
+                "run",
+                return_value=type("Result", (), {"returncode": 0})(),
+            ), patch.object(
+                provision, "libvirt_network_is_active", return_value=False
+            ), patch.object(
+                provision, "ensure_libvirt_network_active"
+            ) as ensure_active_mock, patch.object(provision, "run") as run_mock:
+                provision.create_nat_network(
+                    "demo",
+                    {
+                        "name": "demo-net",
+                        "gateway": "192.168.240.1",
+                        "mac": "52:54:00:aa:bb:cc",
+                        "vm_ip": "192.168.240.50",
+                        "dhcp_start": "192.168.240.50",
+                        "dhcp_end": "192.168.240.99",
+                        "bridge_name": "virbr-demo",
+                    },
+                )
+
+        run_mock.assert_not_called()
+        ensure_active_mock.assert_called_once_with("demo-net", bridge_name="virbr-demo")
 
     def test_create_nat_network_cleans_stale_bridge_before_define(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -476,6 +549,8 @@ class LibvirtProvisionTests(unittest.TestCase):
                 provision.subprocess,
                 "run",
                 side_effect=fake_subprocess_run,
+            ), patch.object(
+                provision, "libvirt_network_is_active", return_value=True
             ), patch.object(provision, "run") as run_mock:
                 provision.create_nat_network(
                     "demo",
@@ -498,8 +573,8 @@ class LibvirtProvisionTests(unittest.TestCase):
                     check=False,
                 ),
                 call(["virsh", "net-define", str(fake_xml_path)], sudo=True),
-                call(["virsh", "net-autostart", "demo-net"], sudo=True),
-                call(["virsh", "net-start", "demo-net"], sudo=True),
+                call(["virsh", "net-autostart", "demo-net"], sudo=True, check=False),
+                call(["virsh", "net-start", "demo-net"], sudo=True, check=False),
             ],
         )
 

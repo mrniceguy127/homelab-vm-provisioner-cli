@@ -1,11 +1,27 @@
 """Project-wide constants used by the provisioner."""
 
+import os
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = PACKAGE_DIR.parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
-GLOBAL_CONFIG_PATH = PROJECT_DIR / "vmctl.yaml"
+DEFAULT_DATA_DIR_NAME = "data"
+
+
+def _resolve_default_data_dir():
+    configured_path = os.environ.get("PROVISIONER_DATA_DIR")
+    if not configured_path:
+        return PROJECT_DIR / DEFAULT_DATA_DIR_NAME
+
+    resolved_path = Path(configured_path).expanduser()
+    if resolved_path.is_absolute():
+        return resolved_path
+
+    return PROJECT_DIR / resolved_path
+
+
+GLOBAL_CONFIG_PATH = _resolve_default_data_dir() / "vmctl.yaml"
 
 ADMIN_USER = "vmadmin"
 LEGACY_VM_BUILD_DIR = PROJECT_DIR / ".build"

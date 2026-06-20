@@ -1,0 +1,46 @@
+vm:
+  name: mathias-test
+  user: matt
+  owner_user_id: user-admin
+  network_group_id: ng-c2325602
+  ram_mb: 4096
+  vcpus: 2
+  disk_gb: 10
+  allow_sudo: true
+  allow_same_group_traffic: true
+  allow_host_access: false
+  allow_private_lan_access: false
+  internet_access: false
+  trust: trusted
+  mac_address: 52:54:00:28:82:e8
+  ip_address: 10.80.0.2
+ports:
+  - id: pf-mathias-test-tcp-2222-22-1
+    owner_user_id: user-admin
+    vm_id: mathias-test
+    protocol: tcp
+    proto: tcp
+    external_port: 2222
+    internal_port: 22
+    internal_ip: 10.80.0.2
+    description: ''
+    enabled: true
+    host: 2222
+    guest: 22
+network:
+  profile: isolated_nat
+  mode: isolated_nat
+  network_group_id: ng-c2325602
+  group_name: default-admin
+  owner_user_id: user-admin
+  libvirt_network_name: hvp-ng-default-admin-dfff14
+  name: hvp-ng-default-admin-dfff14
+  bridge_name: hvpb7e31dd53
+  subnet_cidr: 10.80.0.0/28
+  cidr: 10.80.0.0/28
+  gateway_ip: 10.80.0.1
+  gateway: 10.80.0.1
+  dhcp_start: 10.80.0.2
+  dhcp_end: 10.80.0.14
+  vm_ip: 10.80.0.2
+  mac: 52:54:00:28:82:e8

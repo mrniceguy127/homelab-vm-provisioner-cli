@@ -35,23 +35,23 @@ Run these commands on the libvirt host.
 2. Create a user SSH key if you do not already have one:
 
 ```bash
-mkdir -p vm/keys/users
-ssh-keygen -t ed25519 -f vm/keys/users/devbox
+mkdir -p data/vm/keys/users
+ssh-keygen -t ed25519 -f data/vm/keys/users/devbox
 ```
 
-3. Optional: adjust the default local data paths or guest image defaults in `vmctl.yaml`.
+3. Optional: adjust the default local data paths or guest image defaults in `data/vmctl.yaml`.
 
 4. Copy the example config and adjust the VM name, username, and SSH key path:
 
 ```bash
-cp configs/template.yaml.example configs/devbox.yaml
-nano configs/devbox.yaml
+cp data/configs/template.yaml.example data/configs/devbox.yaml
+nano data/configs/devbox.yaml
 ```
 
 5. Create the VM:
 
 ```bash
-./vmctl create configs/devbox.yaml
+./vmctl create data/configs/devbox.yaml
 ```
 
 6. Connect as the admin user after the VM comes up:
@@ -75,21 +75,21 @@ ssh myuser@HOST_IP -p 2222
 Typical flow when you already have the tenant public key and using default key paths:
 
 ```bash
-mkdir -p vm/keys/users
-cp /path/to/tenant.pub vm/keys/users/devbox.pub
+mkdir -p data/vm/keys/users
+cp /path/to/tenant.pub data/vm/keys/users/devbox.pub
 
-nano configs/devbox.yaml
+nano data/configs/devbox.yaml
 
-./vmctl create configs/devbox.yaml
+./vmctl create data/configs/devbox.yaml
 ```
 
 If you do not have the tenant public key yet:
 
 ```bash
-nano configs/devbox.yaml
+nano data/configs/devbox.yaml
 # omit ssh_key_file for now
 
-./vmctl create configs/devbox.yaml
+./vmctl create data/configs/devbox.yaml
 ./vmssh-admin devbox
 ```
 
@@ -103,7 +103,24 @@ ROOT
 ├── test
 ├── vmctl
 ├── vmssh-admin
-├── vmctl.yaml
+├── data/
+│   ├── vmctl.yaml
+│   ├── configs/
+│   │   ├── template.yaml.example
+│   │   └── *.yaml
+│   └── vm/
+│       ├── data/
+│       │   └── <vm>/
+│       │       ├── user-data
+│       │       └── meta-data
+│       ├── state/
+│       │   └── <vm>.yaml
+│       └── keys/
+│           ├── admin/
+│           │   ├── <vm>_admin_ed25519
+│           │   └── <vm>_admin_ed25519.pub
+│           └── users/
+│               └── *.pub
 ├── scripts/
 │   ├── test
 │   ├── coverage
@@ -145,24 +162,6 @@ ROOT
 │   ├── test_provision.py
 │   └── test_reconciler.py
 │
-├── configs/
-│   ├── template.yaml.example
-│   └── *.yaml
-│
-├── vm/
-│   ├── data/
-│   │   └── <vm>/
-│   │       ├── user-data
-│   │       └── meta-data
-│   ├── state/
-│   │   └── <vm>.yaml
-│   └── keys/
-│       ├── admin/
-│       │   ├── <vm>_admin_ed25519
-│       │   └── <vm>_admin_ed25519.pub
-│       └── users/
-│           └── *.pub
-│
 ├── .build/
 │   └── coverage/
 │       ├── .coverage
@@ -179,7 +178,7 @@ ROOT
 | test | Full local verification runner |
 | vmctl | CLI launcher |
 | vmssh-admin | Admin SSH launcher |
-| vmctl.yaml | Global default path configuration |
+| data/vmctl.yaml | Global default path configuration |
 | setup | Project setup script |
 | scripts/lint | Ruff lint runner |
 | scripts/test | Python test suite runner |
@@ -190,8 +189,8 @@ ROOT
 | homelab_vm_provisioner | Main Python package |
 | docs | Sphinx documentation source |
 | tests | Unit and integration tests |
-| configs | VM definitions |
-| vm | Default VM data, state, and key directories |
+| data/configs | VM definitions |
+| data/vm | Default VM data, state, and key directories |
 | .build | Coverage artifacts |
 | README.md | Documentation |
 
@@ -222,7 +221,7 @@ Default guest image: Debian 12 cloud image. The default libvirt `os_variant` is 
 ## Start from the example config
 
 ```bash
-cp configs/template.yaml.example configs/my-vm.yaml
+cp data/configs/template.yaml.example data/configs/my-vm.yaml
 ```
 
 ## Create a VM
@@ -230,7 +229,7 @@ cp configs/template.yaml.example configs/my-vm.yaml
 ### From a file
 
 ```bash
-./vmctl create configs/devbox.yaml
+./vmctl create data/configs/devbox.yaml
 ```
 
 ### From stdin or pipe
@@ -239,7 +238,7 @@ Both `create` and `clone` support reading configs from stdin when the config pat
 
 ```bash
 # From pipe
-cat configs/devbox.yaml | ./vmctl create
+cat data/configs/devbox.yaml | ./vmctl create
 
 # From heredoc
 ./vmctl create <<EOF

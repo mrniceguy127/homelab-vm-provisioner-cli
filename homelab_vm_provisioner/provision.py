@@ -18,7 +18,7 @@ from .constants import (
 )
 from .core import compute_bridge_name, compute_legacy_bridge_name
 from .services import TemplateService
-from .system import run
+from .system import capture_or_none, run
 
 
 def default_nat_bridge_name(vm_name):
@@ -251,6 +251,68 @@ def cleanup_bridge_interface(bridge_name):
     run(["ip", "link", "delete", bridge_name, "type", "bridge"], sudo=True, check=False)
 
 
+def _net_info_reports_active(net_info_text):
+    """Return whether ``virsh net-info`` reports an active network.
+
+    Args:
+        net_info_text: Text output from ``virsh net-info``.
+
+    Returns:
+        bool: ``True`` when the network is active.
+    """
+    for line in net_info_text.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "active":
+            return value.strip().lower() == "yes"
+
+    return False
+
+
+def libvirt_network_is_active(network_name):
+    """Return whether a libvirt network is currently active.
+
+    Args:
+        network_name: Libvirt network name.
+
+    Returns:
+        bool: ``True`` when libvirt reports the network as active.
+    """
+    net_info = capture_or_none(["virsh", "net-info", network_name], sudo=True)
+    if not net_info:
+        return False
+
+    return _net_info_reports_active(net_info)
+
+
+def ensure_libvirt_network_active(network_name, bridge_name=None):
+    """Ensure a defined libvirt network is active.
+
+    Args:
+        network_name: Libvirt network name.
+        bridge_name: Optional bridge interface name for stale bridge cleanup.
+
+    Raises:
+        RuntimeError: If the network cannot be activated.
+    """
+    run(["virsh", "net-autostart", network_name], sudo=True, check=False)
+    run(["virsh", "net-start", network_name], sudo=True, check=False)
+    if libvirt_network_is_active(network_name):
+        return
+
+    if bridge_name and bridge_interface_exists(bridge_name):
+        cleanup_bridge_interface(bridge_name)
+        run(["virsh", "net-start", network_name], sudo=True, check=False)
+        if libvirt_network_is_active(network_name):
+            return
+
+    if bridge_name:
+        raise RuntimeError(
+            f"Libvirt network {network_name} failed to become active on bridge {bridge_name}"
+        )
+
+    raise RuntimeError(f"Libvirt network {network_name} failed to become active")
+
+
 def create_nat_network(vm_name, network):
     """Create and start a libvirt NAT network when needed.
 
@@ -289,14 +351,17 @@ def create_nat_network(vm_name, network):
         stderr=subprocess.DEVNULL,
     )
     if result.returncode == 0:
+        if libvirt_network_is_active(network["name"]):
+            return
+
+        ensure_libvirt_network_active(network["name"], bridge_name=bridge_name)
         return
 
     if bridge_interface_exists(bridge_name):
         cleanup_bridge_interface(bridge_name)
 
     run(["virsh", "net-define", str(xml_path)], sudo=True)
-    run(["virsh", "net-autostart", network["name"]], sudo=True)
-    run(["virsh", "net-start", network["name"]], sudo=True)
+    ensure_libvirt_network_active(network["name"], bridge_name=bridge_name)
 
 
 def vm_exists(vm_name):

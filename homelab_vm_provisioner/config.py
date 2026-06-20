@@ -1,6 +1,8 @@
 """Helpers for reading user configs and persisting VM state."""
 
 import ipaddress
+import os
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -9,6 +11,7 @@ import yaml
 from .constants import (
     BASE_IMG_NAME,
     BASE_IMG_URL,
+    DEFAULT_DATA_DIR_NAME,
     DEFAULT_VM_DNS_RESOLVERS,
     GLOBAL_CONFIG_PATH,
     LEGACY_VM_BUILD_DIR,
@@ -34,6 +37,66 @@ DEFAULT_IMAGE_SETTINGS = {
 DEFAULT_DNS_SETTINGS = {
     "resolvers": DEFAULT_VM_DNS_RESOLVERS,
 }
+
+
+def provisioner_data_root():
+    """Return the effective provisioner data root.
+
+    Relative ``PROVISIONER_DATA_DIR`` values resolve from the CLI project root.
+    """
+    configured_path = os.environ.get("PROVISIONER_DATA_DIR")
+    if not configured_path:
+        return PROJECT_DIR / DEFAULT_DATA_DIR_NAME
+
+    resolved_path = Path(configured_path).expanduser()
+    if resolved_path.is_absolute():
+        return resolved_path
+
+    return PROJECT_DIR / resolved_path
+
+
+def _merge_directory_contents(source, target):
+    """Move directory contents into a target directory without overwriting.
+
+    Args:
+        source: Existing source directory.
+        target: Target directory under the configured data root.
+    """
+    if not source.exists():
+        return
+
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        return
+
+    for entry in source.iterdir():
+        destination = target / entry.name
+        if entry.is_dir() and destination.exists() and destination.is_dir():
+            _merge_directory_contents(entry, destination)
+        elif not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(entry), str(destination))
+
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+
+
+def ensure_data_layout():
+    """Migrate legacy repo-root data into the configured data directory."""
+    data_root = provisioner_data_root()
+    data_root.mkdir(parents=True, exist_ok=True)
+
+    if GLOBAL_CONFIG_PATH != PROJECT_DIR / "vmctl.yaml":
+        legacy_global_config = PROJECT_DIR / "vmctl.yaml"
+        if legacy_global_config.exists() and not GLOBAL_CONFIG_PATH.exists():
+            GLOBAL_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy_global_config), str(GLOBAL_CONFIG_PATH))
+
+    _merge_directory_contents(PROJECT_DIR / "configs", data_root / "configs")
+    _merge_directory_contents(PROJECT_DIR / "vm", data_root / "vm")
 
 
 def load_config(path):
@@ -74,6 +137,8 @@ def load_global_config():
         dict: Parsed project configuration, or an empty dictionary when the
         file does not exist.
     """
+    ensure_data_layout()
+
     if not GLOBAL_CONFIG_PATH.exists():
         return {}
 
@@ -101,6 +166,7 @@ def resolve_config_path(config_path):
     Raises:
         FileNotFoundError: If no candidate path exists.
     """
+    ensure_data_layout()
     raw_path = Path(config_path).expanduser()
     candidates = [raw_path]
 
@@ -117,11 +183,16 @@ def resolve_config_path(config_path):
         if candidate.exists():
             return candidate
 
+        if not candidate.is_absolute():
+            data_candidate = resolve_project_path(candidate)
+            if data_candidate.exists():
+                return data_candidate
+
     raise FileNotFoundError(f"Missing config file: {config_path}")
 
 
 def resolve_project_path(path):
-    """Resolve a user path relative to the project root when needed.
+    """Resolve a user path relative to the configured data root when needed.
 
     Args:
         path: Absolute or project-relative path.
@@ -133,7 +204,12 @@ def resolve_project_path(path):
     if resolved.is_absolute():
         return resolved
 
-    return PROJECT_DIR / resolved
+    return provisioner_data_root() / resolved
+
+
+def resolve_state_artifact_path(path):
+    """Resolve a persisted state artifact path to an absolute path."""
+    return resolve_project_path(path)
 
 
 def global_path_settings(global_config=None):
@@ -145,6 +221,8 @@ def global_path_settings(global_config=None):
     Returns:
         dict[str, Path]: Resolved path settings.
     """
+    ensure_data_layout()
+
     if global_config is None:
         global_config = load_global_config()
 
@@ -397,7 +475,8 @@ def resolve_setup_script_path(path, global_config=None):
 
 def default_config_file_for_vm(vm_name):
     """Return the default saved config path for a VM name."""
-    return PROJECT_DIR / "configs" / f"{vm_name}.yaml"
+    ensure_data_layout()
+    return provisioner_data_root() / "configs" / f"{vm_name}.yaml"
 
 
 def state_file_for_vm(vm_name, global_config=None):

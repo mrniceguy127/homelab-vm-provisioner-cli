@@ -1,4 +1,4 @@
-# Copy this file to configs/<your-vm>.yaml and adjust the values.
+# Copy this file to data/configs/<your-vm>.yaml and adjust the values.
 
 vm:
   # Keep the VM name at 12 characters or fewer so the default firewalld
@@ -16,7 +16,7 @@ vm:
 
 paths:
   # Optional: override the default local VM data directory for this VM.
-  # Relative paths resolve from the project root.
+  # Relative paths resolve from the configured provisioner data directory.
   # vm_data_dir: vm/data/my-vm
 
 image:
