@@ -293,20 +293,17 @@ class ParserAndMainTests(unittest.TestCase):
         destroy_mock.assert_not_called()
         ssh_admin_mock.assert_not_called()
 
-    def test_build_parser_accepts_no_config_for_stdin(self):
-        """Test that the parser accepts omitted config argument for stdin."""
+    def test_build_parser_requires_config_for_create(self):
+        """Test that create requires an explicit config path."""
         parser = cli.build_parser()
-        args = parser.parse_args(["create"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["create"])
 
-        self.assertEqual(args.command, "create")
-        self.assertIsNone(args.config)
-
-    def test_main_dispatches_create_without_config_for_stdin(self):
-        """Test that main() dispatches create with None when no config provided."""
-        with patch.object(cli, "create") as create_mock:
-            cli.main(["create"])
-
-        create_mock.assert_called_once_with(None)
+    def test_build_parser_requires_config_for_clone(self):
+        """Test that clone requires an explicit config path."""
+        parser = cli.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["clone", "source-vm"])
 
 
 class CreateTests(unittest.TestCase):

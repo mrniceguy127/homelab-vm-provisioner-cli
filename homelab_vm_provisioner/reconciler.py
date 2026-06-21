@@ -1116,7 +1116,51 @@ def reconcile_networking(
 
     global_config = load_global_config()
     vm_records = configured_vm_records()
-    network_groups = grouped_network_records(vm_records)
+    return reconcile_networking_records(
+        vm_records,
+        policy_only=policy_only,
+        allow_destructive=allow_destructive,
+        global_config=global_config,
+    )
+
+
+def reconcile_networking_records(
+    vm_records,
+    policy_only=False,
+    allow_destructive=False,
+    global_config=None,
+    network_groups=None,
+):
+    """Reconcile networking state from externally supplied VM records."""
+
+    if global_config is None:
+        global_config = load_global_config()
+
+    if network_groups is None:
+        network_groups = grouped_network_records(vm_records)
+    else:
+        grouped_records = {
+            group["id"]: {**group, "vms": []}
+            for group in network_groups
+        }
+        for record in vm_records:
+            grouped_records.setdefault(
+                record["network_group_id"],
+                {
+                    "id": record["network_group_id"],
+                    "owner_user_id": record["owner_user_id"],
+                    "name": record["network_group_name"],
+                    "profile": record["profile"],
+                    "libvirt_network_name": record["libvirt_network_name"],
+                    "bridge_name": record["bridge_name"],
+                    "subnet_cidr": record["subnet_cidr"],
+                    "gateway_ip": record["gateway_ip"],
+                    "dhcp_start": record["dhcp_start"],
+                    "dhcp_end": record["dhcp_end"],
+                    "vms": [],
+                },
+            )["vms"].append(record)
+        network_groups = list(grouped_records.values())
     network_results = []
 
     _log_reconcile(

@@ -63,6 +63,7 @@ from .reconciler import (
     configured_vm_records,
     normalize_network_profile,
     reconcile_networking,
+    reconcile_networking_records,
     validate_networking_changes,
 )
 from .system import capture_or_none, host_lifecycle_lock, require_tools, run
@@ -326,6 +327,12 @@ def print_create_summary(vm_name, vm_user, trust, network, admin_private_key, po
 def load_setup_script_content(config_data, global_config):
     """Load the optional guest setup script contents from the VM config."""
     scripts_config = config_data.get("scripts") or {}
+    inline_script_content = scripts_config.get("setup_script_content")
+    if inline_script_content is not None:
+        if not inline_script_content.endswith("\n"):
+            inline_script_content += "\n"
+        return inline_script_content
+
     setup_script_file = scripts_config.get("setup_script_file")
     if not setup_script_file:
         return None
@@ -394,9 +401,8 @@ def load_config_for_path_or_stdin(config_path):
     return load_config(resolved), resolved
 
 
-def prepare_vm_definition(config_path):
-    """Resolve a VM config into the effective provisioning inputs."""
-    config_data, resolved_config_path = load_config_for_path_or_stdin(config_path)
+def prepare_vm_definition_from_config(config_data, resolved_config_path):
+    """Resolve an already loaded VM config into provisioning inputs."""
     global_config = load_global_config()
     vm = config_data["vm"]
     net_cfg = config_data.get("network", {})
@@ -406,6 +412,7 @@ def prepare_vm_definition(config_path):
     vm_name = vm["name"]
     vm_user = vm["user"]
     vm_ssh_key_file = None
+    inline_vm_public_key = vm.get("ssh_public_key")
     if vm.get("ssh_key_file"):
         vm_ssh_key_file = resolve_user_key_path(vm["ssh_key_file"], global_config=global_config)
     allow_sudo = bool(vm.get("allow_sudo", False))
@@ -428,7 +435,9 @@ def prepare_vm_definition(config_path):
         admin_key_dir=default_admin_key_dir(global_config),
     )
     vm_public_key = None
-    if vm_ssh_key_file is not None:
+    if inline_vm_public_key is not None:
+        vm_public_key = inline_vm_public_key.strip()
+    elif vm_ssh_key_file is not None:
         vm_public_key = vm_ssh_key_file.read_text(encoding="utf-8").strip()
 
     network = build_network_config(vm_name, net_cfg)
@@ -468,6 +477,68 @@ def prepare_vm_definition(config_path):
             admin_private_key,
         ),
     }
+
+
+def prepare_vm_definition(config_path):
+    """Resolve a VM config into the effective provisioning inputs."""
+    config_data, resolved_config_path = load_config_for_path_or_stdin(config_path)
+    return prepare_vm_definition_from_config(config_data, resolved_config_path)
+
+
+def create_from_definition(definition, reconcile_payload=None, persist_state=True):
+    """Provision a VM from a prepared definition.
+
+    This is the internal service-mode entrypoint used by orchestrators.
+    """
+    vm_name = definition["vm_name"]
+    with host_lifecycle_lock("create", vm_name=vm_name):
+        if reconcile_payload and definition["network"].get("network_group_id"):
+            validate_networking_changes(
+                vm_records=reconcile_payload.get("vm_records"),
+                allow_destructive=reconcile_payload.get("allow_destructive", False),
+            )
+
+        if persist_state:
+            save_vm_state(vm_name, definition["state"])
+
+        ensure_host_services()
+        if definition["network"].get("network_group_id") and reconcile_payload:
+            reconcile_networking_records(
+                reconcile_payload.get("vm_records", []),
+                policy_only=reconcile_payload.get("policy_only", False),
+                allow_destructive=reconcile_payload.get("allow_destructive", False),
+                network_groups=reconcile_payload.get("network_groups"),
+            )
+        elif definition["network"].get("network_group_id"):
+            reconcile_networking()
+
+        base_img = ensure_base_image(definition["image_settings"])
+        vm_disk = create_vm_disk(vm_name, definition["vm"]["disk_gb"], base_img)
+        network_arg = build_network_arg(vm_name, definition["network"])
+        seed_iso = render_seed_iso_for_definition(definition)
+
+        if definition["network"]["mode"].startswith("nat"):
+            create_nat_network(vm_name, definition["network"])
+
+        virt_install(
+            vm_name,
+            definition["vm"],
+            network_arg,
+            vm_disk,
+            seed_iso,
+            definition["image_settings"]["os_variant"],
+        )
+
+        if persist_state:
+            apply_runtime_networking(
+                vm_name,
+                definition["network"],
+                definition["trust"],
+                definition["ports"],
+                definition["state"],
+            )
+
+    return definition
 
 
 def render_seed_iso_for_definition(definition):
@@ -664,6 +735,13 @@ def list_snapshots(vm_name):
 def current_snapshot_id():
     """Return a timestamp-based restore point identifier."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _load_service_payload_from_stdin(message):
+    payload = load_config_from_stdin() or {}
+    if not isinstance(payload, dict):
+        raise ValueError(message)
+    return payload
 
 
 def copy_local_file(source_path, target_path):
@@ -915,6 +993,90 @@ def snapshot_create(vm_name):
     print(f"Created restore point {snapshot_id} for {vm_name}")
 
 
+def snapshot_create_record_data(vm_name, payload):
+    """Create snapshot artifacts and return DB-ready metadata."""
+    require_tools()
+
+    config_snapshot = payload.get("config_snapshot") or payload.get("config")
+    if not isinstance(config_snapshot, dict):
+        raise ValueError("snapshot_create_record_data requires config_snapshot mapping")
+
+    runtime_state_snapshot = dict(payload.get("runtime_state_snapshot") or payload.get("runtime_state") or {})
+    snapshot_id = payload.get("snapshot_id") or current_snapshot_id()
+    global_config = load_global_config()
+    snapshot_path = snapshot_path_for_vm(vm_name, snapshot_id, global_config=global_config)
+    disk_path = vm_disk_path(vm_name)
+    seed_path = seed_iso_path(vm_name)
+    source_was_running = False
+
+    if not disk_path.exists():
+        raise FileNotFoundError(f"VM disk was not found for snapshotting: {disk_path}")
+
+    with host_lifecycle_lock("snapshot-create", vm_name=vm_name):
+        snapshot_path.mkdir(parents=True, exist_ok=False)
+
+        try:
+            source_was_running = stop_vm_domain(vm_name) if vm_exists(vm_name) else False
+
+            snapshot_disk = snapshot_path / f"{vm_name}.qcow2"
+            copy_qcow2_image(disk_path, snapshot_disk)
+
+            snapshot_seed = None
+            if seed_path.exists():
+                snapshot_seed = snapshot_path / f"{vm_name}-seed.iso"
+                copy_image_artifact(seed_path, snapshot_seed)
+
+            vm_data_dir = runtime_state_snapshot.get("vm_data_dir")
+            resolved_vm_data_dir = resolve_state_artifact_path(vm_data_dir) if vm_data_dir else None
+            snapshot_vm_data_dir = None
+            if resolved_vm_data_dir and resolved_vm_data_dir.exists():
+                snapshot_vm_data_dir = snapshot_path / "vm-data"
+                copy_local_tree(resolved_vm_data_dir, snapshot_vm_data_dir)
+
+            current_state = load_vm_state(vm_name)
+            admin_private_key = current_state.get("admin_private_key")
+            snapshot_keys_dir = None
+            if admin_private_key:
+                admin_key_path = resolve_state_artifact_path(admin_private_key)
+                if admin_key_path.exists():
+                    snapshot_keys_dir = snapshot_path / "keys"
+                    copy_local_file(admin_key_path, snapshot_keys_dir / admin_key_path.name)
+                admin_pub_path = Path(str(admin_key_path) + ".pub")
+                if admin_pub_path.exists():
+                    snapshot_keys_dir = snapshot_path / "keys"
+                    copy_local_file(admin_pub_path, snapshot_keys_dir / admin_pub_path.name)
+
+            metadata = {
+                "snapshot_id": snapshot_id,
+                "vm_name": vm_name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source_was_running": source_was_running,
+                "config_snapshot": config_snapshot,
+                "runtime_state_snapshot": runtime_state_snapshot,
+                "artifact_manifest": {
+                    "snapshot_path": str(snapshot_path),
+                    "disk": str(snapshot_disk),
+                    "seed_iso": str(snapshot_seed) if snapshot_seed is not None else None,
+                    "vm_data_dir_snapshot": str(snapshot_vm_data_dir) if snapshot_vm_data_dir else None,
+                    "keys_dir": str(snapshot_keys_dir) if snapshot_keys_dir else None,
+                },
+                "local_artifacts": {
+                    "vm_data_dir": vm_data_dir,
+                    "admin_private_key": admin_private_key,
+                },
+            }
+            chown_path_to_current_user(snapshot_path)
+        except Exception:
+            if snapshot_path.exists():
+                shutil.rmtree(snapshot_path, ignore_errors=True)
+            raise
+        finally:
+            if source_was_running:
+                start_vm_domain(vm_name)
+
+    return metadata
+
+
 def snapshot_restore(vm_name, snapshot_id):
     """Restore a VM disk and host artifacts from a saved restore point."""
     require_tools()
@@ -1034,6 +1196,106 @@ def snapshot_restore(vm_name, snapshot_id):
     print(f"Restored {vm_name} from restore point {snapshot_id}")
 
 
+def snapshot_restore_record_data(vm_name, snapshot_id, metadata, vm_records=None, network_groups=None):
+    """Restore a VM from externally supplied snapshot metadata."""
+    require_tools()
+
+    if not isinstance(metadata, dict):
+        raise ValueError("snapshot_restore_record_data requires snapshot metadata mapping")
+
+    config_snapshot = metadata.get("config_snapshot")
+    runtime_state_snapshot = dict(metadata.get("runtime_state_snapshot") or {})
+    artifact_manifest = metadata.get("artifact_manifest") or {}
+    if not isinstance(config_snapshot, dict):
+        raise ValueError("snapshot_restore_record_data requires config_snapshot mapping")
+
+    snapshot_disk = Path(artifact_manifest.get("disk") or "")
+    snapshot_seed_value = artifact_manifest.get("seed_iso")
+    snapshot_seed = Path(snapshot_seed_value) if snapshot_seed_value else None
+    snapshot_vm_data_dir_value = artifact_manifest.get("vm_data_dir_snapshot")
+    snapshot_vm_data_dir = Path(snapshot_vm_data_dir_value) if snapshot_vm_data_dir_value else None
+    snapshot_keys_dir_value = artifact_manifest.get("keys_dir")
+    snapshot_keys_dir = Path(snapshot_keys_dir_value) if snapshot_keys_dir_value else None
+
+    if not snapshot_disk.exists():
+        raise FileNotFoundError(f"Snapshot disk was not found for {vm_name}: {snapshot_disk}")
+    if snapshot_seed is not None and not snapshot_seed.exists():
+        raise FileNotFoundError(f"Snapshot seed ISO was not found for {vm_name}: {snapshot_seed}")
+
+    with host_lifecycle_lock("snapshot-restore", vm_name=vm_name):
+        current_state = load_vm_state(vm_name)
+        current_network = merged_vm_network(vm_name, current_state)
+        current_ports = current_state.get("ports") or []
+        cleanup_vm_runtime_definition(vm_name, current_network, current_ports, remove_storage=False)
+
+        copy_qcow2_image(snapshot_disk, vm_disk_path(vm_name))
+        if snapshot_seed is not None:
+            copy_image_artifact(snapshot_seed, seed_iso_path(vm_name))
+
+        restored_vm_data_dir = runtime_state_snapshot.get("vm_data_dir")
+        if restored_vm_data_dir and snapshot_vm_data_dir is not None and snapshot_vm_data_dir.exists():
+            copy_local_tree(snapshot_vm_data_dir, resolve_state_artifact_path(restored_vm_data_dir))
+
+        admin_private_key = (metadata.get("local_artifacts") or {}).get("admin_private_key")
+        if admin_private_key and snapshot_keys_dir is not None:
+            admin_key_path = resolve_state_artifact_path(admin_private_key)
+            snapshot_key_path = snapshot_keys_dir / admin_key_path.name
+            snapshot_pub_path = snapshot_keys_dir / f"{admin_key_path.name}.pub"
+            if snapshot_key_path.exists():
+                copy_local_file(snapshot_key_path, admin_key_path)
+            if snapshot_pub_path.exists():
+                copy_local_file(snapshot_pub_path, Path(str(admin_key_path) + ".pub"))
+
+        restored_network = restored_network_config(vm_name, runtime_state_snapshot, config_snapshot)
+        restored_ports = runtime_state_snapshot.get("ports") or config_snapshot.get("ports") or []
+        restored_trust = runtime_state_snapshot.get("trust") or config_snapshot.get("vm", {}).get(
+            "trust",
+            "untrusted",
+        )
+        restored_state = dict(runtime_state_snapshot)
+        restored_state["vm_name"] = vm_name
+        restored_state["network"] = restored_network
+        restored_state["ports"] = restored_ports
+        restored_state["trust"] = restored_trust
+
+        if restored_network.get("network_group_id") and isinstance(vm_records, list):
+            validate_networking_changes(vm_records=vm_records)
+
+        save_vm_state(vm_name, restored_state)
+
+        ensure_host_services()
+        if restored_network.get("network_group_id") and isinstance(vm_records, list):
+            reconcile_networking_records(
+                vm_records,
+                network_groups=network_groups,
+            )
+        elif restored_network["mode"].startswith("nat"):
+            create_nat_network(vm_name, restored_network)
+
+        virt_install(
+            vm_name,
+            config_snapshot["vm"],
+            build_network_arg(vm_name, restored_network),
+            vm_disk_path(vm_name),
+            seed_iso_path(vm_name),
+            image_settings_for_config(config_snapshot, global_config=load_global_config())["os_variant"],
+        )
+        stop_vm_domain(vm_name)
+        apply_runtime_networking(
+            vm_name,
+            restored_network,
+            restored_trust,
+            restored_ports,
+            restored_state,
+        )
+
+    return {
+        "snapshot_id": snapshot_id,
+        "vm_name": vm_name,
+        "runtime_state": restored_state,
+    }
+
+
 def snapshot_delete(vm_name, snapshot_id):
     """Delete a saved restore point."""
     snapshot_path = snapshot_path_for_vm(vm_name, snapshot_id)
@@ -1042,6 +1304,121 @@ def snapshot_delete(vm_name, snapshot_id):
 
     shutil.rmtree(snapshot_path)
     print(f"Deleted restore point {snapshot_id} for {vm_name}")
+
+
+def snapshot_delete_record_data(vm_name, snapshot_id, metadata):
+    """Delete snapshot artifacts using externally supplied metadata."""
+    artifact_manifest = metadata.get("artifact_manifest") or {}
+    snapshot_path_value = artifact_manifest.get("snapshot_path")
+    if not snapshot_path_value:
+        raise ValueError("snapshot_delete_record_data requires artifact_manifest.snapshot_path")
+
+    snapshot_path = Path(snapshot_path_value)
+    if not snapshot_path.exists():
+        raise FileNotFoundError(f"Snapshot not found for {vm_name}: {snapshot_id}")
+
+    shutil.rmtree(snapshot_path)
+    return {"vm_name": vm_name, "snapshot_id": snapshot_id}
+
+
+def clone_from_definition(source_vm_name, definition, reconcile_payload=None, persist_state=True):
+    """Clone a VM using a prepared target definition."""
+    target_vm_name = definition["vm_name"]
+    if target_vm_name == source_vm_name:
+        raise ValueError("Clone target must use a different vm.name than the source VM")
+    if not vm_exists(source_vm_name):
+        raise FileNotFoundError(f"Source VM not found: {source_vm_name}")
+    if vm_exists(target_vm_name):
+        raise RuntimeError(f"Target VM already exists: {target_vm_name}")
+
+    source_disk = vm_disk_path(source_vm_name)
+    target_disk = vm_disk_path(target_vm_name)
+    if not source_disk.exists():
+        raise FileNotFoundError(f"Source VM disk was not found: {source_disk}")
+    if target_disk.exists():
+        raise RuntimeError(f"Target VM disk already exists: {target_disk}")
+
+    with host_lifecycle_lock("clone", vm_name=target_vm_name):
+        if reconcile_payload and definition["network"].get("network_group_id"):
+            validate_networking_changes(
+                vm_records=reconcile_payload.get("vm_records"),
+                allow_destructive=reconcile_payload.get("allow_destructive", False),
+            )
+
+        if persist_state:
+            save_vm_state(target_vm_name, definition["state"])
+
+        source_state = load_vm_state(source_vm_name)
+        source_config_path = source_state.get("config_path")
+        source_vm_user = None
+        if source_config_path:
+            try:
+                resolved_source_config_path = resolve_config_path(source_config_path)
+            except FileNotFoundError:
+                resolved_source_config_path = None
+
+            if resolved_source_config_path and resolved_source_config_path.exists():
+                source_vm_user = load_config(resolved_source_config_path).get("vm", {}).get("user")
+
+        source_was_running = False
+        try:
+            source_was_running = stop_vm_domain(source_vm_name)
+            ensure_host_services()
+            if definition["network"].get("network_group_id") and reconcile_payload:
+                reconcile_networking_records(
+                    reconcile_payload.get("vm_records", []),
+                    policy_only=reconcile_payload.get("policy_only", False),
+                    allow_destructive=reconcile_payload.get("allow_destructive", False),
+                    network_groups=reconcile_payload.get("network_groups"),
+                )
+            elif definition["network"].get("network_group_id"):
+                reconcile_networking()
+
+            copy_qcow2_image(source_disk, target_disk)
+            prepare_cloned_guest_disk(
+                target_disk,
+                target_vm_name,
+                [source_vm_user, definition["vm_user"]],
+            )
+
+            if definition["network"]["mode"].startswith("nat"):
+                create_nat_network(target_vm_name, definition["network"])
+
+            seed_iso = render_seed_iso_for_definition(definition)
+            virt_install(
+                target_vm_name,
+                definition["vm"],
+                build_network_arg(target_vm_name, definition["network"]),
+                target_disk,
+                seed_iso,
+                definition["image_settings"]["os_variant"],
+            )
+            if persist_state:
+                apply_runtime_networking(
+                    target_vm_name,
+                    definition["network"],
+                    definition["trust"],
+                    definition["ports"],
+                    definition["state"],
+                )
+        except Exception:
+            cleanup_vm_runtime_definition(
+                target_vm_name,
+                merged_vm_network(target_vm_name, definition["state"]),
+                definition["ports"],
+                remove_storage=True,
+            )
+            cleanup_local_vm_artifacts(
+                target_vm_name,
+                admin_private_key=definition["state"].get("admin_private_key"),
+                vm_data_dir=definition["state"].get("vm_data_dir"),
+            )
+            raise
+        finally:
+            if source_was_running:
+                start_vm_domain(source_vm_name)
+
+    return definition
 
 
 def clone(source_vm_name, config_path=None):
@@ -1269,7 +1646,7 @@ def build_parser():
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     create_parser = subcommands.add_parser("create")
-    create_parser.add_argument("config", nargs="?", default=None, help="Config file path (omit to read from stdin)")
+    create_parser.add_argument("config", help="Config file path")
 
     destroy_parser = subcommands.add_parser("destroy")
     destroy_parser.add_argument("name")
@@ -1282,7 +1659,7 @@ def build_parser():
 
     clone_parser = subcommands.add_parser("clone")
     clone_parser.add_argument("source")
-    clone_parser.add_argument("config", nargs="?", default=None, help="Config file path (omit to read from stdin)")
+    clone_parser.add_argument("config", help="Config file path")
 
     snapshot_create_parser = subcommands.add_parser("snapshot-create")
     snapshot_create_parser.add_argument("name")
