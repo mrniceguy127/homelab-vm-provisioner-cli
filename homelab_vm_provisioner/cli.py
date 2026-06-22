@@ -13,8 +13,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
-
 from .config import (
     default_admin_key_dir,
     default_snapshot_root,
