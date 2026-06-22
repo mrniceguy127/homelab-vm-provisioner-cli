@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
+import yaml
+
 from .constants import (
     BASE_IMG_NAME,
     BASE_IMG_URL,
