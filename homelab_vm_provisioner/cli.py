@@ -865,27 +865,20 @@ def start(vm_name):
     """Start an existing libvirt VM."""
     require_tools(["virsh"])
 
-    with host_lifecycle_lock("start", vm_name=vm_name):
-        state = load_vm_state(vm_name)
-        if state.get("network", {}).get("network_group_id"):
-            reconcile_networking()
-        elif is_libvirt_nat_network(state.get("network") or {}):
-            reconcile_networking(policy_only=True)
-        started = start_vm_domain(vm_name)
+    from .service_workflows import start_vm as start_vm_internal
 
-    if started:
-        print(f"Started VM: {vm_name}")
+    start_vm_internal(vm_name)
+    print(f"Started VM: {vm_name}")
 
 
 def stop(vm_name):
     """Stop an existing libvirt VM."""
     require_tools(["virsh"])
 
-    with host_lifecycle_lock("stop", vm_name=vm_name):
-        stopped = stop_vm_domain(vm_name)
+    from .service_workflows import stop_vm as stop_vm_internal
 
-    if stopped:
-        print(f"Stopped VM: {vm_name}")
+    stop_vm_internal(vm_name)
+    print(f"Stopped VM: {vm_name}")
 
 
 def snapshot_create(vm_name):
@@ -1617,23 +1610,10 @@ def destroy(vm_name):
     Args:
         vm_name: VM name.
     """
-    with host_lifecycle_lock("destroy", vm_name=vm_name):
-        state = load_vm_state(vm_name)
-        network = merged_vm_network(vm_name, state)
-        ports = state.get("ports") or []
-        if network.get("network_group_id"):
-            validate_networking_changes(vm_records=planned_managed_vm_records(vm_name))
+    from .service_workflows import destroy_vm as destroy_vm_internal
 
-        cleanup_vm_runtime_definition(vm_name, network, ports, remove_storage=True)
-        cleanup_local_vm_artifacts(
-            vm_name,
-            admin_private_key=state.get("admin_private_key"),
-            vm_data_dir=state.get("vm_data_dir"),
-        )
-        if network.get("network_group_id"):
-            reconcile_networking()
-        elif is_libvirt_nat_network(network):
-            reconcile_networking(policy_only=True)
+    destroy_vm_internal(vm_name)
+    print(f"Destroyed VM: {vm_name}")
 
 
 def build_parser():

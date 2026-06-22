@@ -22,7 +22,14 @@ fi
 mkdir -p "$COVERAGE_DIR"
 export COVERAGE_FILE="$COVERAGE_DIR/.coverage"
 
-"$PYTHON_BIN" -m coverage run --rcfile "$ROOT_DIR/pyproject.toml" -m unittest tests.test_config tests.test_provision tests.test_adapters tests.test_services tests.test_managed_nftables tests.test_reconciler tests.test_main tests.test_network tests.test_system tests.test_cli tests.test_integration
+# Run tests with coverage, but continue even if tests fail to generate coverage report
+TEST_EXIT_CODE=0
+"$PYTHON_BIN" -m coverage run --rcfile "$ROOT_DIR/pyproject.toml" -m unittest tests.test_integration tests.test_config tests.test_provision tests.test_adapters tests.test_services tests.test_managed_nftables tests.test_reconciler tests.test_main tests.test_network tests.test_system tests.test_cli tests.test_constants tests.test_runtime_observation tests.test_service_workflows tests.test_snapshot_service tests.test_reconciler_helpers tests.test_service_mode tests.test_core || TEST_EXIT_CODE=$?
+
+# Always generate coverage reports
 "$PYTHON_BIN" -m coverage report --rcfile "$ROOT_DIR/pyproject.toml"
 "$PYTHON_BIN" -m coverage html --rcfile "$ROOT_DIR/pyproject.toml" -d "$COVERAGE_DIR/html"
 "$PYTHON_BIN" -m coverage xml --rcfile "$ROOT_DIR/pyproject.toml" -o "$COVERAGE_DIR/coverage.xml"
+
+# Exit with the test exit code
+exit $TEST_EXIT_CODE

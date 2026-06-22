@@ -4,20 +4,27 @@ These helpers are not exposed as standalone CLI commands. They let other Python
 services drive the provisioner directly without going through ``vmctl``.
 """
 
-from .cli import (
+from .config import load_vm_state
+from .reconciler import reconcile_networking_records
+from .runtime_observation import current_domain_state, merged_vm_network
+from .service_workflows import (
     clone_from_definition,
     create_from_definition,
-    current_domain_state,
-    destroy,
-    load_vm_state,
-    merged_vm_network,
     prepare_vm_definition_from_config,
-    reconcile_networking_records,
+)
+from .service_workflows import (
+    destroy_vm as destroy_vm_internal,
+)
+from .service_workflows import (
+    start_vm as start_vm_internal,
+)
+from .service_workflows import (
+    stop_vm as stop_vm_internal,
+)
+from .snapshot_service import (
     snapshot_create_record_data,
     snapshot_delete_record_data,
     snapshot_restore_record_data,
-    start,
-    stop,
 )
 
 
@@ -45,17 +52,17 @@ def reconcile_vm_records(vm_records, network_groups=None, policy_only=False, all
 
 def start_vm(vm_name):
     """Start a VM directly through the Python module."""
-    return start(vm_name)
+    return start_vm_internal(vm_name)
 
 
 def stop_vm(vm_name):
     """Stop a VM directly through the Python module."""
-    return stop(vm_name)
+    return stop_vm_internal(vm_name)
 
 
 def destroy_vm(vm_name):
     """Destroy a VM directly through the Python module."""
-    return destroy(vm_name)
+    return destroy_vm_internal(vm_name)
 
 
 def refresh_vm_runtime_state(vm_name):

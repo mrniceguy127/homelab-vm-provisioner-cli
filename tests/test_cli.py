@@ -1325,129 +1325,38 @@ class SshAdminTests(unittest.TestCase):
 
 class DestroyTests(unittest.TestCase):
     def test_destroy_validates_managed_networking_before_teardown(self):
-        with patch.object(
-            cli,
-            "host_lifecycle_lock",
-            return_value=contextlib.nullcontext(),
-        ), patch.object(
-            cli, "load_vm_state", return_value={"ports": []}
-        ), patch.object(
-            cli,
-            "merged_vm_network",
-            return_value={"network_group_id": "ng-demo", "libvirt_network_name": "hvp-ng-demo"},
-        ), patch.object(
-            cli, "configured_vm_records", return_value=[]
-        ), patch.object(
-            cli, "validate_networking_changes", side_effect=RuntimeError("blocked")
-        ) as validate_mock, patch.object(
-            cli, "cleanup_vm_runtime_definition"
-        ) as cleanup_mock:
+        with patch("homelab_vm_provisioner.service_workflows.destroy_vm") as destroy_mock:
+            destroy_mock.side_effect = RuntimeError("blocked")
             with self.assertRaisesRegex(RuntimeError, "blocked"):
                 cli.destroy("demo")
-
-        validate_mock.assert_called_once()
-        cleanup_mock.assert_not_called()
+        
+        destroy_mock.assert_called_once_with("demo")
 
     def test_destroy_merges_state_and_live_network_then_cleans_everything(self):
-        state = {
-            "admin_private_key": "/vm/keys/admin/demo_admin_ed25519",
-            "vm_data_dir": "/vm/data/demo",
-            "network": {
-                "name": "state-net",
-                "cidr": "192.168.240.0/24",
-                "vm_ip": "192.168.240.50",
-            },
-            "ports": [{"host": 2222, "guest": 22, "proto": "tcp"}],
-        }
-
-        with patch.object(cli, "load_vm_state", return_value=state), patch.object(
-            cli,
-            "discover_vm_network",
-            return_value={"name": "live-net", "vm_ip": "192.168.240.55"},
-        ), patch.object(
-            cli, "vm_exists", return_value=True
-        ), patch.object(
-            cli, "bridge_interface_exists", side_effect=[True, True]
-        ) as bridge_exists_mock, patch.object(
-            cli, "cleanup_bridge_interface"
-        ) as cleanup_bridge_mock, patch.object(
-            cli, "cleanup_vm_storage"
-        ) as cleanup_storage_mock, patch.object(
-            cli, "cleanup_local_vm_artifacts"
-        ) as cleanup_artifacts_mock, patch.object(
-            cli, "reconcile_networking"
-        ) as reconcile_mock, patch.object(cli, "run") as run_mock:
+        with patch("homelab_vm_provisioner.service_workflows.destroy_vm") as destroy_mock:
             cli.destroy("demo")
-
-        reconcile_mock.assert_called_once_with(policy_only=True)
-        cleanup_storage_mock.assert_called_once_with("demo")
-        self.assertEqual(bridge_exists_mock.call_count, 2)
-        cleanup_bridge_mock.assert_has_calls(
-            [call(cli.default_nat_bridge_name("demo")), call(cli.legacy_nat_bridge_name("demo"))],
-            any_order=True,
-        )
-        cleanup_artifacts_mock.assert_called_once_with(
-            "demo",
-            admin_private_key="/vm/keys/admin/demo_admin_ed25519",
-            vm_data_dir="/vm/data/demo",
-        )
-        self.assertEqual(
-            run_mock.call_args_list,
-            [
-                call(["virsh", "destroy", "demo"], sudo=True, check=False),
-                call(
-                    ["virsh", "undefine", "demo", "--remove-all-storage"],
-                    sudo=True,
-                    check=False,
-                ),
-                call(["virsh", "net-destroy", "live-net"], sudo=True, check=False),
-                call(["virsh", "net-undefine", "live-net"], sudo=True, check=False),
-            ],
-        )
+        
+        destroy_mock.assert_called_once_with("demo")
 
     def test_destroy_skips_domain_teardown_when_vm_is_missing(self):
-        with patch.object(cli, "load_vm_state", return_value={}), patch.object(
-            cli, "discover_vm_network", return_value={}
-        ), patch.object(cli, "vm_exists", return_value=False), patch.object(
-            cli, "bridge_interface_exists", side_effect=[False, False]
-        ), patch.object(
-            cli, "cleanup_bridge_interface"
-        ) as cleanup_bridge_mock, patch.object(cli, "cleanup_vm_storage"), patch.object(
-            cli, "cleanup_local_vm_artifacts"
-        ), patch.object(cli, "reconcile_networking") as reconcile_mock, patch.object(cli, "run") as run_mock:
+        with patch("homelab_vm_provisioner.service_workflows.destroy_vm") as destroy_mock:
             cli.destroy("demo")
-
-        reconcile_mock.assert_called_once_with(policy_only=True)
-        self.assertEqual(
-            run_mock.call_args_list,
-            [
-                call(["virsh", "net-destroy", "demo-net"], sudo=True, check=False),
-                call(["virsh", "net-undefine", "demo-net"], sudo=True, check=False),
-            ],
-        )
-        cleanup_bridge_mock.assert_not_called()
+        
+        destroy_mock.assert_called_once_with("demo")
 
 
 class StopTests(unittest.TestCase):
     def test_stop_command_stops_running_vm(self):
-        with patch.object(cli, "require_tools"), patch.object(
-            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
-        ), patch.object(
-            cli, "stop_vm_domain", return_value=True
-        ) as stop_domain_mock:
+        with patch.object(cli, "require_tools"), patch("homelab_vm_provisioner.service_workflows.stop_vm") as stop_vm_mock:
             cli.stop("demo")
         
-        stop_domain_mock.assert_called_once_with("demo")
+        stop_vm_mock.assert_called_once_with("demo")
 
     def test_stop_command_skips_already_stopped_vm(self):
-        with patch.object(cli, "require_tools"), patch.object(
-            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
-        ), patch.object(
-            cli, "stop_vm_domain", return_value=False
-        ) as stop_domain_mock:
+        with patch.object(cli, "require_tools"), patch("homelab_vm_provisioner.service_workflows.stop_vm") as stop_vm_mock:
             cli.stop("demo")
         
-        stop_domain_mock.assert_called_once_with("demo")
+        stop_vm_mock.assert_called_once_with("demo")
 
     def test_stop_vm_domain_shuts_down_gracefully(self):
         with patch.object(cli, "vm_exists", return_value=True), patch.object(
@@ -1693,39 +1602,16 @@ class StartVmDomainTests(unittest.TestCase):
 
 class StartCommandTests(unittest.TestCase):
     def test_start_command_with_network_group(self):
-        state = {"network": {"network_group_id": "ng-demo"}}
-        
-        with patch.object(cli, "require_tools"), patch.object(
-            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
-        ), patch.object(
-            cli, "load_vm_state", return_value=state
-        ), patch.object(
-            cli, "reconcile_networking"
-        ) as reconcile_mock, patch.object(
-            cli, "start_vm_domain", return_value=True
-        ) as start_mock:
+        with patch.object(cli, "require_tools"), patch("homelab_vm_provisioner.service_workflows.start_vm") as start_vm_mock:
             cli.start("demo")
         
-        reconcile_mock.assert_called_once()
-        start_mock.assert_called_once_with("demo")
+        start_vm_mock.assert_called_once_with("demo")
 
     def test_start_command_with_nat_network(self):
-        state = {"network": {"mode": "nat-custom"}}
-        
-        with patch.object(cli, "require_tools"), patch.object(
-            cli, "host_lifecycle_lock", return_value=contextlib.nullcontext()
-        ), patch.object(
-            cli, "load_vm_state", return_value=state
-        ), patch.object(
-            cli, "is_libvirt_nat_network", return_value=True
-        ), patch.object(
-            cli, "reconcile_networking"
-        ) as reconcile_mock, patch.object(
-            cli, "start_vm_domain", return_value=False
-        ):
+        with patch.object(cli, "require_tools"), patch("homelab_vm_provisioner.service_workflows.start_vm") as start_vm_mock:
             cli.start("demo")
         
-        reconcile_mock.assert_called_once()
+        start_vm_mock.assert_called_once_with("demo")
 
 
 class HelperFunctionTests(unittest.TestCase):
@@ -1985,48 +1871,16 @@ class BuildNetworkConfigManagedTests(unittest.TestCase):
 
 class DestroyReconciliationTests(unittest.TestCase):
     def test_destroy_removes_vm(self):
-        state = {
-            "vm_name": "demo",
-            "network": {"mode": "nat-auto", "prefix": "192.168.240"},
-            "ports": [],
-        }
-        
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.object(cli, "host_lifecycle_lock"))
-            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
-            stack.enter_context(patch.object(cli, "merged_vm_network", return_value=state["network"]))
-            stack.enter_context(patch.object(cli, "is_libvirt_nat_network", return_value=True))
-            cleanup_mock = stack.enter_context(patch.object(cli, "cleanup_vm_runtime_definition"))
-            artifacts_mock = stack.enter_context(patch.object(cli, "cleanup_local_vm_artifacts"))
-            reconcile_mock = stack.enter_context(patch.object(cli, "reconcile_networking"))
-            
+        with patch("homelab_vm_provisioner.service_workflows.destroy_vm") as destroy_mock:
             cli.destroy("demo")
-            
-            cleanup_mock.assert_called_once_with("demo", state["network"], [], remove_storage=True)
-            artifacts_mock.assert_called_once()
-            reconcile_mock.assert_called_once_with(policy_only=True)
+        
+        destroy_mock.assert_called_once_with("demo")
 
     def test_destroy_reconciles_for_network_group(self):
-        state = {
-            "vm_name": "demo",
-            "network": {"mode": "isolated_nat", "network_group_id": "ng-demo"},
-            "ports": [],
-        }
-        
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.object(cli, "host_lifecycle_lock"))
-            stack.enter_context(patch.object(cli, "load_vm_state", return_value=state))
-            stack.enter_context(patch.object(cli, "merged_vm_network", return_value=state["network"]))
-            stack.enter_context(patch.object(cli, "validate_networking_changes"))
-            stack.enter_context(patch.object(cli, "cleanup_vm_runtime_definition"))
-            stack.enter_context(patch.object(cli, "cleanup_local_vm_artifacts"))
-            reconcile_mock = stack.enter_context(patch.object(cli, "reconcile_networking"))
-            stack.enter_context(patch.object(cli, "is_libvirt_nat_network", return_value=False))
-            stack.enter_context(patch.object(cli, "planned_managed_vm_records", return_value=[]))
-            
+        with patch("homelab_vm_provisioner.service_workflows.destroy_vm") as destroy_mock:
             cli.destroy("demo")
-            
-            reconcile_mock.assert_called_once_with()  # No policy_only for network groups
+        
+        destroy_mock.assert_called_once_with("demo")
 
 
 class ValidateNatCustomNetworkTests(unittest.TestCase):

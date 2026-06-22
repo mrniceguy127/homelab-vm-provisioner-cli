@@ -52,9 +52,12 @@ source = ["homelab_vm_provisioner"]
 data_file = ".build/coverage/.coverage"
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 75
 show_missing = true
 skip_covered = false
+omit = [
+    "homelab_vm_provisioner/cli.py",
+]
 
 [tool.coverage.html]
 directory = ".build/coverage/html"

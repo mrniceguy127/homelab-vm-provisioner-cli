@@ -5,7 +5,16 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from homelab_vm_provisioner import cli, config, managed_nftables, network, provision, reconciler
+from homelab_vm_provisioner import (
+    cli,
+    config,
+    managed_nftables,
+    network,
+    provision,
+    reconciler,
+    service_workflows,
+    system,
+)
 
 from .helpers import completed_process
 
@@ -273,6 +282,10 @@ class IntegrationTests(unittest.TestCase):
         stack.enter_context(patch.object(provision, "IMG_DIR", img_dir))
         stack.enter_context(patch.object(provision, "run", side_effect=host.provision_run))
         stack.enter_context(patch("subprocess.run", side_effect=host.subprocess_run))
+        # Patch system.run for service_workflows (used by destroy, start, stop)
+        stack.enter_context(patch.object(system, "run", side_effect=host.cli_run))
+        # Also patch service_workflows.run in case it was already imported
+        stack.enter_context(patch.object(service_workflows, "run", side_effect=host.cli_run))
         stack.enter_context(
             patch.object(reconciler, "apply_managed_nftables_ruleset", side_effect=host.apply_nftables_ruleset)
         )
