@@ -9,6 +9,7 @@ import ipaddress
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,16 +101,21 @@ def _validate_nat_custom_network(network):
 def build_network_config(vm_name, net_cfg):
     """Build the effective network settings for a VM.
 
+    Virsh networks are created from network groups, NOT from VM names.
+    Each network group maps to exactly one virsh network, which is shared
+    by all VMs in that group.
+
     Args:
-        vm_name: VM name.
-        net_cfg: Raw ``network`` config section.
+        vm_name: VM name (NOT used for virsh network naming in network_group mode).
+        net_cfg: Raw ``network`` config section with network_group_id required for new VMs.
 
     Returns:
         dict: Effective network settings.
 
     Raises:
-        ValueError: If ``network.mode`` is invalid or incomplete.
+        ValueError: If network config is invalid.
     """
+    # Network group mode (required for new VMs) - virsh networks belong to network groups
     if net_cfg.get("network_group_id") or net_cfg.get("subnet_cidr") or net_cfg.get("profile"):
         profile = normalize_network_profile(net_cfg)
         network = {
@@ -136,12 +142,24 @@ def build_network_config(vm_name, net_cfg):
             network.setdefault("cidr", "main-lan")
             return network
 
+        # Validate required fields for managed networks
         required = ["name", "bridge_name", "cidr", "gateway", "dhcp_start", "dhcp_end", "vm_ip"]
         missing = [field for field in required if not network.get(field)]
         if missing:
             raise ValueError(f"Missing managed network-group fields: {missing}")
+        
+        # CRITICAL: Ensure libvirt_network_name is NEVER derived from VM name
+        # The name field must be the network group's libvirt network name, NOT the VM name
+        if not network.get("libvirt_network_name"):
+            raise ValueError(
+                "libvirt_network_name is required and must be derived from network_group_id, "
+                "NOT from VM name. VM networks must belong to network groups."
+            )
+        
         return network
 
+    # Legacy modes are DEPRECATED but supported for backward compatibility
+    # New VMs should use network_group_id
     mode = net_cfg.get("mode", "nat-auto")
     network = {
         "mode": mode,
@@ -154,6 +172,7 @@ def build_network_config(vm_name, net_cfg):
         network["libvirt_network_name"] = network["name"]
         network["bridge_name"] = net_cfg.get("bridge_name", default_nat_bridge_name(vm_name))
         network["profile"] = "isolated_nat"
+        print(f"WARNING: VM {vm_name} uses legacy nat-auto mode. Use network_group_id for new VMs.", file=sys.stderr)
         return network
 
     if mode == "nat-custom":
@@ -186,6 +205,7 @@ def build_network_config(vm_name, net_cfg):
         network["libvirt_network_name"] = network["name"]
         network["bridge_name"] = net_cfg.get("bridge_name", default_nat_bridge_name(vm_name))
         network["profile"] = "isolated_nat"
+        print(f"WARNING: VM {vm_name} uses legacy nat-custom mode. Use network_group_id for new VMs.", file=sys.stderr)
         return network
 
     if mode == "bridge":
@@ -202,6 +222,9 @@ def restored_network_config(vm_name, restored_state, restored_config):
 
     Prefer the snapshotted VM state so runtime identity fields like MAC and
     auto-assigned NAT addressing survive a restore.
+    
+    For network_group mode, network names must come from network_group_id, NOT vm_name.
+    For legacy modes, VM-based names are supported for backward compatibility only.
     """
     state_network = dict(restored_state.get("network") or {})
     if not state_network:
@@ -222,7 +245,19 @@ def restored_network_config(vm_name, restored_state, restored_config):
     state_network.setdefault("gateway_ip", config_network.get("gateway_ip") or config_network.get("gateway"))
 
     if mode.startswith("nat") or profile in ("nat", "isolated_nat", "private"):
-        state_network.setdefault("name", config_network.get("libvirt_network_name") or config_network.get("name", f"{vm_name}-net"))
+        # For network_group mode, use libvirt_network_name from config
+        # For legacy modes, fall back to VM-based name for backward compatibility
+        if state_network.get("network_group_id"):
+            if not state_network.get("libvirt_network_name") and not config_network.get("libvirt_network_name"):
+                raise ValueError(
+                    f"Restored VM {vm_name} with network_group_id is missing libvirt_network_name. "
+                    "Network names must come from network groups, not VM names."
+                )
+            state_network.setdefault("name", config_network.get("libvirt_network_name"))
+        else:
+            # Legacy mode: allow VM-based network names for backward compatibility
+            state_network.setdefault("name", config_network.get("libvirt_network_name") or config_network.get("name", f"{vm_name}-net"))
+        
         state_network.setdefault("bridge_name", config_network.get("bridge_name", default_nat_bridge_name(vm_name)))
         return state_network
 
