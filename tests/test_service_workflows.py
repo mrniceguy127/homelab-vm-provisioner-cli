@@ -262,6 +262,162 @@ class ApplyRuntimeNetworkingWorkflowTest(unittest.TestCase):
         mock_cli_apply.assert_called_once_with("test-vm", network, "trusted", ports, state)
 
 
+class DestroyVmTest(unittest.TestCase):
+    """Test destroy_vm cleans up snapshots along with VM artifacts."""
+
+    @patch("homelab_vm_provisioner.service_workflows.reconcile_networking")
+    @patch("homelab_vm_provisioner.service_workflows.cleanup_local_vm_artifacts")
+    @patch("homelab_vm_provisioner.service_workflows.cleanup_vm_runtime_definition")
+    @patch("homelab_vm_provisioner.service_workflows.validate_networking_changes")
+    @patch("homelab_vm_provisioner.service_workflows.merged_vm_network")
+    @patch("homelab_vm_provisioner.service_workflows.load_vm_state")
+    @patch("homelab_vm_provisioner.service_workflows.host_lifecycle_lock")
+    @patch("shutil.rmtree")
+    @patch("homelab_vm_provisioner.config.default_snapshot_root")
+    @patch("homelab_vm_provisioner.config.load_global_config")
+    def test_cleans_up_snapshots_before_destroying_vm(
+        self,
+        mock_load_global_config,
+        mock_default_snapshot_root,
+        mock_rmtree,
+        mock_lock,
+        mock_load_state,
+        mock_merged_network,
+        mock_validate_changes,
+        mock_cleanup_runtime,
+        mock_cleanup_artifacts,
+        mock_reconcile,
+    ):
+        """Should remove all VM snapshots before destroying VM definition."""
+        from pathlib import Path
+
+        from homelab_vm_provisioner.service_workflows import destroy_vm
+
+        mock_lock.return_value.__enter__ = lambda _: None
+        mock_lock.return_value.__exit__ = lambda *_: None
+
+        snapshot_root = Path("/tmp/snapshots/test-vm")
+        mock_default_snapshot_root.return_value = Path("/tmp/snapshots")
+        mock_load_global_config.return_value = {}
+
+        # Mock snapshot root exists
+        with patch.object(Path, "exists", return_value=True):
+            mock_load_state.return_value = {
+                "network": {"mode": "nat"},
+                "ports": [],
+                "admin_private_key": "/tmp/key",
+                "vm_data_dir": "/tmp/vm-data",
+            }
+            mock_merged_network.return_value = {"mode": "nat"}
+
+            destroy_vm("test-vm")
+
+            # Should remove snapshot directory
+            mock_rmtree.assert_called_once()
+            call_args = mock_rmtree.call_args
+            self.assertEqual(str(call_args[0][0]), str(snapshot_root))
+            self.assertFalse(call_args[1].get("ignore_errors", True))
+
+            # Should cleanup runtime definition and artifacts
+            mock_cleanup_runtime.assert_called_once()
+            mock_cleanup_artifacts.assert_called_once()
+
+    @patch("homelab_vm_provisioner.service_workflows.reconcile_networking")
+    @patch("homelab_vm_provisioner.service_workflows.cleanup_local_vm_artifacts")
+    @patch("homelab_vm_provisioner.service_workflows.cleanup_vm_runtime_definition")
+    @patch("homelab_vm_provisioner.service_workflows.validate_networking_changes")
+    @patch("homelab_vm_provisioner.service_workflows.merged_vm_network")
+    @patch("homelab_vm_provisioner.service_workflows.load_vm_state")
+    @patch("homelab_vm_provisioner.service_workflows.host_lifecycle_lock")
+    @patch("homelab_vm_provisioner.config.default_snapshot_root")
+    @patch("homelab_vm_provisioner.config.load_global_config")
+    def test_succeeds_when_no_snapshots_exist(
+        self,
+        mock_load_global_config,
+        mock_default_snapshot_root,
+        mock_lock,
+        mock_load_state,
+        mock_merged_network,
+        mock_validate_changes,
+        mock_cleanup_runtime,
+        mock_cleanup_artifacts,
+        mock_reconcile,
+    ):
+        """Should succeed when VM has no snapshots."""
+        from pathlib import Path
+
+        from homelab_vm_provisioner.service_workflows import destroy_vm
+
+        mock_lock.return_value.__enter__ = lambda _: None
+        mock_lock.return_value.__exit__ = lambda *_: None
+
+        mock_default_snapshot_root.return_value = Path("/tmp/snapshots")
+        mock_load_global_config.return_value = {}
+
+        # Mock snapshot root does not exist
+        with patch.object(Path, "exists", return_value=False):
+            mock_load_state.return_value = {
+                "network": {"mode": "nat"},
+                "ports": [],
+            }
+            mock_merged_network.return_value = {"mode": "nat"}
+
+            # Should not raise
+            destroy_vm("test-vm")
+
+            # Should still cleanup VM artifacts
+            mock_cleanup_runtime.assert_called_once()
+            mock_cleanup_artifacts.assert_called_once()
+
+    @patch("homelab_vm_provisioner.service_workflows.reconcile_networking")
+    @patch("homelab_vm_provisioner.service_workflows.cleanup_local_vm_artifacts")
+    @patch("homelab_vm_provisioner.service_workflows.cleanup_vm_runtime_definition")
+    @patch("homelab_vm_provisioner.service_workflows.validate_networking_changes")
+    @patch("homelab_vm_provisioner.service_workflows.merged_vm_network")
+    @patch("homelab_vm_provisioner.service_workflows.load_vm_state")
+    @patch("homelab_vm_provisioner.service_workflows.host_lifecycle_lock")
+    @patch("shutil.rmtree")
+    @patch("homelab_vm_provisioner.config.default_snapshot_root")
+    @patch("homelab_vm_provisioner.config.load_global_config")
+    def test_raises_on_snapshot_cleanup_permission_error(
+        self,
+        mock_load_global_config,
+        mock_default_snapshot_root,
+        mock_rmtree,
+        mock_lock,
+        mock_load_state,
+        mock_merged_network,
+        mock_validate_changes,
+        mock_cleanup_runtime,
+        mock_cleanup_artifacts,
+        mock_reconcile,
+    ):
+        """Should raise RuntimeError when snapshot cleanup fails with PermissionError."""
+        from pathlib import Path
+
+        from homelab_vm_provisioner.service_workflows import destroy_vm
+
+        mock_lock.return_value.__enter__ = lambda _: None
+        mock_lock.return_value.__exit__ = lambda *_: None
+
+        mock_default_snapshot_root.return_value = Path("/tmp/snapshots")
+        mock_load_global_config.return_value = {}
+        mock_rmtree.side_effect = PermissionError("Permission denied")
+
+        with patch.object(Path, "exists", return_value=True):
+            mock_load_state.return_value = {
+                "network": {"mode": "nat"},
+                "ports": [],
+            }
+            mock_merged_network.return_value = {"mode": "nat"}
+
+            with self.assertRaises(RuntimeError) as ctx:
+                destroy_vm("test-vm")
+
+            self.assertIn("Failed to clean up snapshots", str(ctx.exception))
+            self.assertIn("test-vm", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
 

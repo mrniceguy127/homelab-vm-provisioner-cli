@@ -344,7 +344,18 @@ def stop_vm(vm_name):
 
 
 def destroy_vm(vm_name):
-    """Destroy a VM and remove its associated host artifacts."""
+    """Destroy a VM and remove its associated host artifacts.
+    
+    This function safely removes:
+    - All VM snapshots and their disk files
+    - The libvirt domain and associated storage
+    - VM-owned artifacts (keys, data directories)
+    - Networking configuration
+    
+    Shared resources like base images and templates are preserved.
+    """
+    import shutil
+
     from .reconciler import configured_vm_records
 
     def planned_managed_vm_records(vm_name, replacement_record=None):
@@ -354,12 +365,42 @@ def destroy_vm(vm_name):
             records.append(replacement_record)
         return records
 
+    def cleanup_vm_snapshots(vm_name):
+        """Remove all snapshots for a VM.
+        
+        Snapshots must be cleaned up before VM state is destroyed to ensure
+        we can still list and locate snapshot artifacts.
+        """
+        from .config import default_snapshot_root, load_global_config
+        
+        try:
+            global_config = load_global_config()
+            snapshot_root = default_snapshot_root(global_config) / vm_name
+            
+            if not snapshot_root.exists():
+                return  # No snapshots to clean up
+            
+            # Remove entire VM snapshot directory tree
+            shutil.rmtree(snapshot_root, ignore_errors=False)
+        except FileNotFoundError:
+            # Snapshot root already gone - idempotent cleanup
+            pass
+        except (PermissionError, OSError) as error:
+            # Surface real filesystem errors that prevent cleanup
+            raise RuntimeError(
+                f"Failed to clean up snapshots for {vm_name}: {error}"
+            ) from error
+
     with host_lifecycle_lock("destroy", vm_name=vm_name):
         state = load_vm_state(vm_name)
         network = merged_vm_network(vm_name, state)
         ports = state.get("ports") or []
         if network.get("network_group_id"):
             validate_networking_changes(vm_records=planned_managed_vm_records(vm_name))
+
+        # Clean up snapshots before destroying VM runtime definition
+        # This ensures snapshot metadata is available during cleanup
+        cleanup_vm_snapshots(vm_name)
 
         cleanup_vm_runtime_definition(vm_name, network, ports, remove_storage=True)
         cleanup_local_vm_artifacts(

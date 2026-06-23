@@ -823,3 +823,130 @@ ports:
 
 ---
 
+# Service Mode Integration
+
+The provisioner provides Python-level APIs for integration with services, enabling programmatic VM operations without invoking the CLI.
+
+## Service Mode APIs
+
+Located in `homelab_vm_provisioner/service_mode.py`:
+
+### VM Lifecycle
+
+```python
+from homelab_vm_provisioner.service_mode import (
+    create_vm,
+    clone_vm,
+    destroy_vm,
+    start_vm,
+    stop_vm,
+    refresh_vm_runtime_state
+)
+
+# Create VM from config dictionary
+definition = create_vm(config_data, resolved_config_path="<service>", reconcile_payload=None)
+
+# Clone VM from config dictionary
+definition = clone_vm(source_vm_name, config_data, resolved_config_path="<service>", reconcile_payload=None)
+
+# Destroy VM
+destroy_vm(vm_name)
+
+# Start/stop VM
+start_vm(vm_name)
+stop_vm(vm_name)
+
+# Get refreshed runtime state (includes status, network, ports, MAC, IP)
+state = refresh_vm_runtime_state(vm_name)
+```
+
+### Network Reconciliation
+
+```python
+from homelab_vm_provisioner.service_mode import reconcile_vm_records
+
+# Reconcile networking from desired records
+reconcile_vm_records(
+    vm_records,
+    network_groups=None,
+    policy_only=False,
+    allow_destructive=False
+)
+```
+
+### Snapshot Management
+
+```python
+from homelab_vm_provisioner.service_mode import (
+    create_snapshot_record,
+    restore_snapshot_record,
+    delete_snapshot_record
+)
+
+# Create snapshot and get metadata
+snapshot_data = create_snapshot_record(vm_name, payload)
+
+# Restore snapshot from metadata
+restore_snapshot_record(
+    vm_name,
+    snapshot_id,
+    metadata,
+    vm_records=None,
+    network_groups=None
+)
+
+# Delete snapshot from metadata
+delete_snapshot_record(vm_name, snapshot_id, metadata)
+```
+
+## Monorepo Integration
+
+When used within the [homelab-vm-provisioner](https://github.com/example/homelab-vm-provisioner) monorepo, this CLI is integrated with:
+
+- **API Service** (`homelab-vm-provisioner-api`): Express API that enqueues async jobs
+- **Worker Daemon** (`homelab-vm-provisioner-worker`): Executes jobs by calling `vmctl` commands
+- **Database Service** (`homelab-vm-provisioner-db`): PostgreSQL job queue and event log
+- **React Client** (`homelab-vm-provisioner-client`): Web UI for VM management
+
+The monorepo provides:
+- Unified `./setup`, `./build`, `./test`, and `./start` scripts
+- Docker deployment mode
+- Coordinated testing across all components
+- Centralized environment configuration
+
+See the [monorepo README](../README.md) for setup and deployment instructions.
+
+## Database-Backed Workflows
+
+The provisioner's stdin support enables database-driven provisioning:
+
+```python
+import subprocess
+import yaml
+
+# Generate config from database
+config = {
+    "vm": {
+        "name": "generated-vm",
+        "user": "tenant",
+        "ram_mb": 4096,
+        "vcpus": 2,
+        "disk_gb": 40
+    },
+    "network": {"mode": "nat-auto"}
+}
+
+# Provision via stdin
+proc = subprocess.run(
+    ["./vmctl", "create"],
+    input=yaml.dump(config),
+    text=True,
+    capture_output=True
+)
+```
+
+This pattern is used by the API/worker system for async provisioning workflows.
+
+---
+
+
