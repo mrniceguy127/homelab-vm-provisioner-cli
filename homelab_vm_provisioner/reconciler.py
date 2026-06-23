@@ -1139,15 +1139,20 @@ def reconcile_networking_records(
     if network_groups is None:
         network_groups = grouped_network_records(vm_records)
     else:
+        # Use authoritative network_groups data from database
         grouped_records = {
             group["id"]: {**group, "vms": []}
             for group in network_groups
         }
         for record in vm_records:
-            grouped_records.setdefault(
-                record["network_group_id"],
-                {
-                    "id": record["network_group_id"],
+            network_group_id = record["network_group_id"]
+            if network_group_id not in grouped_records:
+                # Network group not found in database - this indicates a data consistency issue
+                # Log warning and skip this VM or use fallback data
+                print(f"WARNING: VM {record['vm_name']} references unknown network_group_id: {network_group_id}")
+                # Create fallback entry using VM record data (may be stale)
+                grouped_records[network_group_id] = {
+                    "id": network_group_id,
                     "owner_user_id": record["owner_user_id"],
                     "name": record["network_group_name"],
                     "profile": record["profile"],
@@ -1158,8 +1163,9 @@ def reconcile_networking_records(
                     "dhcp_start": record["dhcp_start"],
                     "dhcp_end": record["dhcp_end"],
                     "vms": [],
-                },
-            )["vms"].append(record)
+                }
+            # Always use the authoritative network_groups data, only append VM to vms list
+            grouped_records[network_group_id]["vms"].append(record)
         network_groups = list(grouped_records.values())
     network_results = []
 
