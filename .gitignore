@@ -1,8 +1,8 @@
 .build/
 vm/
 keys/
-configs/*.yaml
-!configs/*.yaml.example
+data/configs/*.yaml
+!data/configs/*.yaml.example
 
 __pycache__/
 *.py[cod]
