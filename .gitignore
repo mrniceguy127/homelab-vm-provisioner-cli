@@ -1,6 +1,6 @@
 .build/
-vm/
-keys/
+data/vm/
+data/keys/
 data/configs/*.yaml
 !data/configs/*.yaml.example
 
