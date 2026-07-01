@@ -903,9 +903,10 @@ delete_snapshot_record(vm_name, snapshot_id, metadata)
 
 When used within the [homelab-vm-provisioner](https://github.com/example/homelab-vm-provisioner) monorepo, this CLI is integrated with:
 
-- **API Service** (`homelab-vm-provisioner-api`): Express API that enqueues async jobs
-- **Worker Daemon** (`homelab-vm-provisioner-worker`): Executes jobs by calling `vmctl` commands
-- **Database Service** (`homelab-vm-provisioner-db`): PostgreSQL job queue and event log
+- **API Service** (`homelab-vm-provisioner-api`): Express API that publishes async jobs
+- **Job Queue** (`homelab-vm-provisioner-job-queue`): RabbitMQ broker delivering jobs to workers
+- **Worker Daemon** (`homelab-vm-provisioner-worker`): Consumes jobs and executes `vmctl` commands
+- **Database Service** (`homelab-vm-provisioner-db`): PostgreSQL store for job metadata, events, and locks
 - **React Client** (`homelab-vm-provisioner-client`): Web UI for VM management
 
 The monorepo provides:
